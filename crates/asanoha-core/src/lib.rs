@@ -1,11 +1,12 @@
-//! Numeric trait, irreps bookkeeping and feature layouts shared by the asanoha
-//! crates. Nothing here is model-specific.
+//! Numeric trait, irreps bookkeeping, feature layouts and a JSON reader shared
+//! by the asanoha crates. Nothing here is model-specific.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod error;
 mod features;
 mod irreps;
+pub mod json;
 mod real;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
