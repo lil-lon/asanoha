@@ -1,0 +1,11 @@
+[package]
+name = "asanoha-core"
+description = "Numeric trait, irreps bookkeeping, feature layouts and file readers shared by the asanoha crates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+testing = []
+
+[dependencies]
