@@ -7,6 +7,12 @@ pub enum Error {
     Irreps(String),
     /// Malformed JSON.
     Json(String),
+    /// Malformed file contents.
+    Format(String),
+    /// A tensor dtype the reader or the requested conversion does not handle.
+    UnsupportedDtype(String),
+    /// No tensor with this name.
+    MissingTensor(String),
 }
 
 impl fmt::Display for Error {
@@ -14,6 +20,9 @@ impl fmt::Display for Error {
         match self {
             Error::Irreps(msg) => write!(f, "irreps error: {msg}"),
             Error::Json(msg) => write!(f, "JSON error: {msg}"),
+            Error::Format(msg) => write!(f, "format error: {msg}"),
+            Error::UnsupportedDtype(msg) => write!(f, "unsupported dtype: {msg}"),
+            Error::MissingTensor(name) => write!(f, "missing tensor {name:?}"),
         }
     }
 }
