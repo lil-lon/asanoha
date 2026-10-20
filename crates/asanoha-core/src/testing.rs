@@ -1,4 +1,5 @@
-//! Dependency-free helpers for tests: a seeded RNG and [`assert_close!`](crate::assert_close).
+//! Dependency-free helpers for tests: a seeded RNG, central differences and
+//! [`assert_close!`](crate::assert_close).
 
 use crate::Real;
 
@@ -29,6 +30,63 @@ impl XorShift64 {
     pub fn next_f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
+
+    /// Standard normal sample (Box–Muller; one sample per call).
+    pub fn normal(&mut self) -> f64 {
+        let u1 = 1.0 - self.next_f64();
+        let u2 = self.next_f64();
+        (-2.0 * u1.ln()).sqrt() * (2.0 * core::f64::consts::PI * u2).cos()
+    }
+
+    /// Uniformly distributed rotation matrix, from a unit quaternion drawn
+    /// uniformly on the 3-sphere.
+    pub fn rotation(&mut self) -> [[f64; 3]; 3] {
+        let q = [self.normal(), self.normal(), self.normal(), self.normal()];
+        let norm = q.iter().map(|c| c * c).sum::<f64>().sqrt();
+        let [w, x, y, z] = q.map(|c| c / norm);
+        [
+            [
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y - w * z),
+                2.0 * (x * z + w * y),
+            ],
+            [
+                2.0 * (x * y + w * z),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z - w * x),
+            ],
+            [
+                2.0 * (x * z - w * y),
+                2.0 * (y * z + w * x),
+                1.0 - 2.0 * (x * x + y * y),
+            ],
+        ]
+    }
+
+    /// Random permutation of `0..n` (Fisher–Yates).
+    pub fn permutation(&mut self, n: usize) -> Vec<usize> {
+        let mut p: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = (self.next_u64() % (i as u64 + 1)) as usize;
+            p.swap(i, j);
+        }
+        p
+    }
+}
+
+/// Gradient of `f` at `x` by central differences with step `h`.
+pub fn finite_difference(mut f: impl FnMut(&[f64]) -> f64, x: &[f64], h: f64) -> Vec<f64> {
+    let mut xh = x.to_vec();
+    (0..x.len())
+        .map(|k| {
+            xh[k] = x[k] + h;
+            let plus = f(&xh);
+            xh[k] = x[k] - h;
+            let minus = f(&xh);
+            xh[k] = x[k];
+            (plus - minus) / (2.0 * h)
+        })
+        .collect()
 }
 
 /// Values accepted by [`assert_close!`](crate::assert_close): a scalar or a
@@ -133,6 +191,127 @@ mod tests {
             sum += x;
         }
         assert!((sum / 10_000.0 - 0.5).abs() < 0.02);
+    }
+
+    // Statistical bounds below are five standard errors of the estimate.
+
+    #[test]
+    fn normal_moments() {
+        let n = 200_000;
+        for seed in [1, 42, 12345] {
+            let mut rng = XorShift64::new(seed);
+            let (mut s1, mut s2) = (0.0, 0.0);
+            for _ in 0..n {
+                let z = rng.normal();
+                s1 += z;
+                s2 += z * z;
+            }
+            let mean = s1 / n as f64;
+            let var = s2 / n as f64 - mean * mean;
+            assert!(mean.abs() < 5.0 * (1.0 / n as f64).sqrt(), "mean {mean}");
+            assert!(
+                (var - 1.0).abs() < 5.0 * (2.0 / n as f64).sqrt(),
+                "var {var}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_is_proper_orthogonal() {
+        for seed in [1, 42, 12345] {
+            let mut rng = XorShift64::new(seed);
+            for _ in 0..1000 {
+                let r = rng.rotation();
+                for i in 0..3 {
+                    for j in 0..3 {
+                        let dot: f64 = (0..3).map(|k| r[i][k] * r[j][k]).sum();
+                        let id = if i == j { 1.0 } else { 0.0 };
+                        crate::assert_close!(dot, id, 2e-15, 0.0);
+                    }
+                }
+                let det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
+                    - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+                    + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+                crate::assert_close!(det, 1.0, 2e-15, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn rotation_moments_match_uniform() {
+        // Under the uniform measure each entry has mean 0, and its square
+        // follows Beta(1/2, 1): mean 1/3, variance 4/45.
+        let n = 30_000;
+        let mut rng = XorShift64::new(7);
+        let (mut s1, mut s2) = ([[0.0; 3]; 3], [[0.0; 3]; 3]);
+        for _ in 0..n {
+            let r = rng.rotation();
+            for i in 0..3 {
+                for j in 0..3 {
+                    s1[i][j] += r[i][j];
+                    s2[i][j] += r[i][j] * r[i][j];
+                }
+            }
+        }
+        for i in 0..3 {
+            for j in 0..3 {
+                let m1 = s1[i][j] / n as f64;
+                let m2 = s2[i][j] / n as f64;
+                assert!(
+                    m1.abs() < 5.0 * (1.0 / 3.0 / n as f64).sqrt(),
+                    "E[R{i}{j}] = {m1}"
+                );
+                assert!(
+                    (m2 - 1.0 / 3.0).abs() < 5.0 * (4.0 / 45.0 / n as f64).sqrt(),
+                    "E[R{i}{j}^2] = {m2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn permutation_is_a_permutation() {
+        for seed in [1, 42, 12345] {
+            let mut rng = XorShift64::new(seed);
+            for n in [0, 1, 2, 7, 100] {
+                let mut p = rng.permutation(n);
+                p.sort_unstable();
+                assert_eq!(p, (0..n).collect::<Vec<_>>());
+            }
+        }
+    }
+
+    #[test]
+    fn permutation_frequencies_match_uniform() {
+        let n = 60_000;
+        let mut rng = XorShift64::new(3);
+        let mut counts = std::collections::BTreeMap::new();
+        for _ in 0..n {
+            *counts.entry(rng.permutation(3)).or_insert(0usize) += 1;
+        }
+        assert_eq!(counts.len(), 6);
+        let expected = n as f64 / 6.0;
+        let bound = 5.0 * (n as f64 * (1.0 / 6.0) * (5.0 / 6.0)).sqrt();
+        for (p, &c) in &counts {
+            assert!((c as f64 - expected).abs() < bound, "{p:?}: {c}");
+        }
+    }
+
+    #[test]
+    fn finite_difference_matches_analytic_gradient() {
+        let f = |x: &[f64]| x[0].sin() * x[1] * x[1] + x[2].exp();
+        let grad = |x: &[f64]| {
+            [
+                x[0].cos() * x[1] * x[1],
+                2.0 * x[0].sin() * x[1],
+                x[2].exp(),
+            ]
+        };
+        let mut rng = XorShift64::new(11);
+        for _ in 0..100 {
+            let x: Vec<f64> = (0..3).map(|_| rng.normal()).collect();
+            crate::assert_close!(finite_difference(f, &x, 1e-5), grad(&x), 1e-9, 0.0);
+        }
     }
 
     #[test]
