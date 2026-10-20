@@ -22,7 +22,9 @@ pub enum Value<'a> {
     Null,
     /// `true` or `false`
     Bool(bool),
-    /// Any number, rounded to the nearest `f64`.
+    /// A number written without fraction or exponent that fits in `i64`.
+    Integer(i64),
+    /// Any other number, rounded to the nearest `f64`.
     Number(f64),
     /// A string with escapes resolved.
     String(Cow<'a, str>),
@@ -46,19 +48,21 @@ impl<'a> Value<'a> {
         }
     }
 
-    /// The number, if this is a number.
+    /// The number, rounded to the nearest `f64`, if this is a number.
     pub fn as_f64(&self) -> Option<f64> {
         match self {
+            Value::Integer(i) => Some(*i as f64),
             Value::Number(x) => Some(*x),
             _ => None,
         }
     }
 
-    /// The number, if it is an integer with `|x| < 2^53`, the range in which
-    /// every integer is exactly representable as `f64`.
+    /// The integer, if this is a [`Value::Integer`].
     pub fn as_i64(&self) -> Option<i64> {
-        let x = self.as_f64()?;
-        (x.fract() == 0.0 && x.abs() < 9_007_199_254_740_992.0).then_some(x as i64)
+        match self {
+            Value::Integer(i) => Some(*i),
+            _ => None,
+        }
     }
 
     /// The elements, if this is an array.
@@ -310,13 +314,16 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(self.err("invalid number")),
         }
+        let mut integer = true;
         if self.peek() == Some(b'.') {
+            integer = false;
             self.pos += 1;
             if self.digits() == 0 {
                 return Err(self.err("invalid number"));
             }
         }
         if matches!(self.peek(), Some(b'e' | b'E')) {
+            integer = false;
             self.pos += 1;
             if matches!(self.peek(), Some(b'+' | b'-')) {
                 self.pos += 1;
@@ -325,10 +332,12 @@ impl<'a> Parser<'a> {
                 return Err(self.err("invalid number"));
             }
         }
+        let text = &self.s[start..self.pos];
+        if integer && let Ok(i) = text.parse() {
+            return Ok(Value::Integer(i));
+        }
         // The JSON number grammar is a subset of what `f64::from_str` accepts.
-        let x: f64 = self.s[start..self.pos]
-            .parse()
-            .map_err(|_| self.err("invalid number"))?;
+        let x: f64 = text.parse().map_err(|_| self.err("invalid number"))?;
         if !x.is_finite() {
             return Err(Error::Json(format!("number out of range at byte {start}")));
         }
@@ -370,10 +379,17 @@ mod tests {
 
     #[test]
     fn numbers() {
+        assert_eq!(parse("12").unwrap(), Value::Integer(12));
+        assert_eq!(parse("12.0").unwrap(), num(12.0));
+        assert_eq!(parse("1e1").unwrap(), num(10.0));
         for (text, x) in [
             ("0", 0.0),
-            ("-0", -0.0),
+            // An integer literal, so the sign of zero is not kept.
+            ("-0", 0.0),
+            ("-0.0", -0.0),
             ("12", 12.0),
+            ("9223372036854775807", 9_223_372_036_854_775_807.0),
+            ("9223372036854775808", 9_223_372_036_854_775_808.0),
             ("-3.25", -3.25),
             ("1e3", 1000.0),
             ("1E-2", 0.01),
@@ -388,15 +404,18 @@ mod tests {
     }
 
     #[test]
-    fn as_i64_only_for_exact_integers() {
+    fn as_i64_only_for_integer_literals() {
         let i = |s| parse(s).unwrap().as_i64();
         assert_eq!(i("0"), Some(0));
         assert_eq!(i("-17"), Some(-17));
-        assert_eq!(i("2.0"), Some(2));
-        assert_eq!(i("9007199254740991"), Some(9_007_199_254_740_991));
-        assert_eq!(i("-9007199254740991"), Some(-9_007_199_254_740_991));
-        assert_eq!(i("9007199254740992"), None);
-        assert_eq!(i("1.5"), None);
+        assert_eq!(i("9007199254740993"), Some(9_007_199_254_740_993));
+        assert_eq!(i("9223372036854775807"), Some(i64::MAX));
+        assert_eq!(i("-9223372036854775808"), Some(i64::MIN));
+        assert_eq!(i("9223372036854775808"), None);
+        assert_eq!(i("2.0"), None);
+        assert_eq!(i("1e2"), None);
+        assert_eq!(i("1.00000000000000001"), None);
+        assert_eq!(i("-1e-400"), None);
         assert_eq!(i("\"1\""), None);
     }
 
@@ -558,7 +577,7 @@ mod tests {
                 text.push_str(if b { "true" } else { "false" });
                 Value::Bool(b)
             }
-            2 => Value::Number(random_number(rng, text)),
+            2 => random_number(rng, text),
             3 => Value::String(Cow::Owned(random_string(rng, text))),
             4 => {
                 text.push('[');
@@ -601,19 +620,26 @@ mod tests {
         v
     }
 
-    fn random_number(rng: &mut XorShift64, text: &mut String) -> f64 {
-        let x = if coin(rng) {
-            below(rng, 1 << 54) as f64 - (1u64 << 53) as f64
-        } else {
-            (rng.next_f64() - 0.5) * 10f64.powi(below(rng, 601) as i32 - 300)
-        };
+    fn random_number(rng: &mut XorShift64, text: &mut String) -> Value<'static> {
+        if coin(rng) {
+            let i = rng.next_u64() as i64;
+            write!(text, "{i}").unwrap();
+            return Value::Integer(i);
+        }
+        let x = (rng.next_f64() - 0.5) * 10f64.powi(below(rng, 601) as i32 - 300);
+        let start = text.len();
         // Both formats print the shortest digits that round-trip.
         if coin(rng) {
             write!(text, "{x}").unwrap();
         } else {
             write!(text, "{x:e}").unwrap();
         }
-        x
+        // `{x}` prints integral values without a fraction, so they read back
+        // as integers when they fit in `i64`.
+        match text[start..].parse() {
+            Ok(i) => Value::Integer(i),
+            Err(_) => Value::Number(x),
+        }
     }
 
     fn random_string(rng: &mut XorShift64, text: &mut String) -> String {
