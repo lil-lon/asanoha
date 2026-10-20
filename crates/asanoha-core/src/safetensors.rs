@@ -4,6 +4,10 @@
 //! The header maps each tensor name to `{"dtype", "shape", "data_offsets"}`,
 //! with offsets relative to the start of the data, plus an optional
 //! `__metadata__` map of strings.
+//!
+//! This is an independent implementation written with reference to
+//! huggingface/safetensors (Apache-2.0). Its license is reproduced in
+//! `THIRD_PARTY_LICENSES/safetensors-LICENSE` for attribution.
 
 use std::collections::BTreeMap;
 
