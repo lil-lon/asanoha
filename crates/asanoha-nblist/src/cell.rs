@@ -16,41 +16,39 @@ pub struct Cell<T: Real> {
 
 impl<T: Real> Cell<T> {
     /// Creates the cell from its rows `a, b, c`. Fails with
-    /// [`Error::SingularCell`] unless `|det H| > 1e-12·max(|a|, |b|, |c|)³`,
-    /// which also rejects non-finite entries.
+    /// [`Error::InvalidCell`] unless `L = max(|a|, |b|, |c|)` is in
+    /// `[1e-8, 1e8]` and `|det H| > 1e-12·L³`, which also rejects non-finite
+    /// entries.
     pub fn from_rows(rows: [[T; 3]; 3]) -> Result<Self, Error> {
-        // Work in f64 on H/s, where s is the power of two obtained by clearing
-        // the mantissa of the largest |entry|. Dividing by s is exact and keeps
-        // the cubes and squared norms below in range for any finite cell.
-        let max = rows
-            .iter()
-            .flatten()
-            .fold(0.0, |m: f64, x| m.max(x.to_f64().abs()));
-        let s = f64::from_bits(max.to_bits() & 0x7ff0_0000_0000_0000);
-        let [a, b, c] = rows.map(|r| r.map(|x| x.to_f64() / s));
-        // Column m of (H/s)⁻¹ is normals[m] / det.
+        let [a, b, c] = rows.map(|r| r.map(T::to_f64));
+        // Column m of H⁻¹ is normals[m] / det H.
         let normals = [cross(b, c), cross(c, a), cross(a, b)];
         let det = dot(a, normals[0]);
         let scale = norm(a).max(norm(b)).max(norm(c));
+        // These bounds give 1e-28 < |normal| ≤ 1e16, 1e-36 < volume ≤ 1e24,
+        // 1e-20 < height ≤ 1e8 and |H⁻¹| < 1e20, all within the normal f32
+        // range.
         let threshold = 1e-12 * scale.powi(3);
-        if det.abs().partial_cmp(&threshold) != Some(Ordering::Greater) {
-            return Err(Error::SingularCell);
+        if !(1e-8..=1e8).contains(&scale)
+            || det.abs().partial_cmp(&threshold) != Some(Ordering::Greater)
+        {
+            return Err(Error::InvalidCell);
         }
+        let volume = det.abs();
         Ok(Self {
             rows,
             inverse: core::array::from_fn(|k| {
-                core::array::from_fn(|m| T::from_f64(normals[m][k] / det / s))
+                core::array::from_fn(|m| T::from_f64(normals[m][k] / det))
             }),
-            volume: T::from_f64(det.abs() * s * s * s),
-            heights: normals.map(|n| T::from_f64(det.abs() / norm(n) * s)),
+            volume: T::from_f64(volume),
+            heights: normals.map(|n| T::from_f64(volume / norm(n))),
         })
     }
 
-    /// Cubic cell with edge `l`. Panics if `l` is zero or not finite.
+    /// Cubic cell with edge `l`. Panics if [`Cell::from_rows`] rejects it.
     pub fn cubic(l: T) -> Self {
         let z = T::ZERO;
-        Self::from_rows([[l, z, z], [z, l, z], [z, z, l]])
-            .expect("cubic cell edge must be nonzero and finite")
+        Self::from_rows([[l, z, z], [z, l, z], [z, z, l]]).expect("invalid cubic cell edge")
     }
 
     /// The lattice vectors `a, b, c` as rows.
@@ -150,21 +148,37 @@ mod tests {
         check_cubic::<f64>(1e-15);
     }
 
-    fn check_extreme_edges<T: Real>(edges: [f64; 2], tol: f64) {
-        // l⁴, the squared norm of a face normal, leaves the range of T for
-        // these edges, while the volume l³ does not.
-        for l in edges.map(T::from_f64) {
-            let c = Cell::cubic(l);
-            assert_close!(c.volume().to_f64(), l.to_f64().powi(3), 0.0, tol);
+    /// `small` is the smallest length of T not below 1e-8.
+    fn check_length_bounds<T: Real>(small: f64, tol: f64) {
+        for l in [1e8, small] {
+            let c = Cell::cubic(T::from_f64(l));
+            assert_close!(c.volume().to_f64(), l.powi(3), 0.0, tol);
             assert_close!(c.heights(), [l; 3], 0.0, tol);
-            assert_close!(c.to_fractional([l; 3]), [1.0; 3], 0.0, tol);
+            assert_close!(c.to_fractional(vec3([l; 3])), [1.0; 3], 0.0, tol);
         }
+        // A cell close to the thinnest accepted at the smallest length:
+        // c = 1e-19 gives det ≈ 1e-35 > 1e-12·(1e-8)³.
+        let (s, t) = (small, 1e-19);
+        let c = cell::<T>([[s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, t]]).unwrap();
+        assert_close!(c.volume().to_f64(), s * s * t, 0.0, tol);
+        assert_close!(c.heights(), [s, s, t], 0.0, tol);
+        assert_close!(c.to_fractional(vec3([s, s, t])), [1.0; 3], 0.0, tol);
     }
 
     #[test]
-    fn extreme_edges() {
-        check_extreme_edges::<f32>([1e10, 1e-12], 1e-7);
-        check_extreme_edges::<f64>([1e100, 1e-100], 1e-15);
+    fn length_bounds() {
+        // f32 rounds 1e-8 down, below the bound.
+        check_length_bounds::<f32>(1.0000001e-8, 1.2e-7);
+        check_length_bounds::<f64>(1e-8, 1e-15);
+    }
+
+    #[test]
+    fn rejects_out_of_range() {
+        let cubic = |l| [[l, 0.0, 0.0], [0.0, l, 0.0], [0.0, 0.0, l]];
+        for l in [1.01e8, 0.99e-8, 1e80, 1.3e-81, f64::from_bits(1)] {
+            assert_eq!(cell::<f64>(cubic(l)), Err(Error::InvalidCell), "{l:e}");
+            assert_eq!(cell::<f32>(cubic(l)), Err(Error::InvalidCell), "{l:e}");
+        }
     }
 
     #[test]
@@ -231,8 +245,8 @@ mod tests {
             [a, b, [0.0, 0.0, f64::NAN]],
             [a, b, [0.0, 0.0, f64::INFINITY]],
         ] {
-            assert_eq!(cell::<f64>(rows), Err(Error::SingularCell), "{rows:?}");
-            assert_eq!(cell::<f32>(rows), Err(Error::SingularCell), "{rows:?}");
+            assert_eq!(cell::<f64>(rows), Err(Error::InvalidCell), "{rows:?}");
+            assert_eq!(cell::<f32>(rows), Err(Error::InvalidCell), "{rows:?}");
         }
     }
 
