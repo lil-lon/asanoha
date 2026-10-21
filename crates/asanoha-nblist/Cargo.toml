@@ -1,0 +1,12 @@
+[package]
+name = "asanoha-nblist"
+description = "Neighbor list with receiver-sorted CSR output for the asanoha crates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+asanoha-core = { path = "../asanoha-core" }
+
+[dev-dependencies]
+asanoha-core = { path = "../asanoha-core", features = ["testing"] }

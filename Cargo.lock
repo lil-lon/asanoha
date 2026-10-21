@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "asanoha-core"
 version = "0.0.0"
+
+[[package]]
+name = "asanoha-nblist"
+version = "0.0.0"
+dependencies = [
+ "asanoha-core",
+]
