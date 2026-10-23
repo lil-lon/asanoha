@@ -17,7 +17,7 @@ pub struct Cell<T: Real> {
 impl<T: Real> Cell<T> {
     /// Creates the cell from its rows `a, b, c`. Fails with
     /// [`Error::InvalidCell`] unless `L = max(|a|, |b|, |c|)` is in
-    /// `[1e-8, 1e8]` and `|det H| > 1e-12·L³`, which also rejects non-finite
+    /// `[1e-8, 1e8]` and `|det H| > 1e-6·L³`, which also rejects non-finite
     /// entries.
     pub fn from_rows(rows: [[T; 3]; 3]) -> Result<Self, Error> {
         let [a, b, c] = rows.map(|r| r.map(T::to_f64));
@@ -25,10 +25,10 @@ impl<T: Real> Cell<T> {
         let normals = [cross(b, c), cross(c, a), cross(a, b)];
         let det = dot(a, normals[0]);
         let scale = norm(a).max(norm(b)).max(norm(c));
-        // These bounds give 1e-28 < |normal| ≤ 1e16, 1e-36 < volume ≤ 1e24,
-        // 1e-20 < height ≤ 1e8 and |H⁻¹| < 1e20, all within the normal f32
-        // range.
-        let threshold = 1e-12 * scale.powi(3);
+        // These bounds give 1e-22 < |normal| ≤ 1e16, 1e-30 < volume ≤ 1e24,
+        // 1e-14 < height ≤ 1e8 and |H⁻¹| < 1e6/L ≤ 1e14, all within the
+        // normal f32 range. |H⁻¹| < 1e6/L also bounds the error of r·H⁻¹.
+        let threshold = 1e-6 * scale.powi(3);
         if !(1e-8..=1e8).contains(&scale)
             || det.abs().partial_cmp(&threshold) != Some(Ordering::Greater)
         {
@@ -157,8 +157,8 @@ mod tests {
             assert_close!(c.to_fractional(vec3([l; 3])), [1.0; 3], 0.0, tol);
         }
         // A cell close to the thinnest accepted at the smallest length:
-        // c = 1e-19 gives det ≈ 1e-35 > 1e-12·(1e-8)³.
-        let (s, t) = (small, 1e-19);
+        // c = 2e-14 gives det ≈ 2e-30 > 1e-6·(1e-8)³.
+        let (s, t) = (small, 2e-14);
         let c = cell::<T>([[s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, t]]).unwrap();
         assert_close!(c.volume().to_f64(), s * s * t, 0.0, tol);
         assert_close!(c.heights(), [s, s, t], 0.0, tol);
@@ -237,7 +237,8 @@ mod tests {
     fn rejects_singular() {
         let [a, b, _] = TRICLINIC;
         let coplanar = [a, b, [a[0] + b[0], a[1] + b[1], a[2] + b[2]]];
-        let flat = [a, b, [0.0, 0.0, 1e-13]];
+        // det = 15·8e-6 = 1.2e-4, below 1e-6·5³ = 1.25e-4.
+        let flat = [a, b, [0.0, 0.0, 8e-6]];
         for rows in [
             coplanar,
             flat,
@@ -253,8 +254,9 @@ mod tests {
     #[test]
     fn accepts_thin_cell() {
         let [a, b, _] = TRICLINIC;
-        let c = cell::<f64>([a, b, [0.0, 0.0, 1e-9]]).unwrap();
-        assert_close!(c.heights(), [3.0, 3.0, 1e-9], 0.0, 1e-15);
+        // det = 15·9e-6 = 1.35e-4, above 1e-6·5³ = 1.25e-4.
+        let c = cell::<f64>([a, b, [0.0, 0.0, 9e-6]]).unwrap();
+        assert_close!(c.heights(), [3.0, 3.0, 9e-6], 0.0, 1e-15);
     }
 
     #[test]
