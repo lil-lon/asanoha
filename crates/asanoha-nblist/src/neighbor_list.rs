@@ -18,7 +18,8 @@ pub struct Structure<'a, T: Real> {
 /// Search algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {
-    /// All pairs times all images within reach of the cutoff; O(N²).
+    /// All pairs times all images within reach of the cutoff; O(N²). Fails
+    /// with [`Error::TooMuchWork`] beyond 2²⁷ pair images.
     Naive,
 }
 
@@ -47,6 +48,11 @@ pub struct NeighborList<T: Real> {
 impl<T: Real> NeighborList<T> {
     /// Builds the list of pairs closer than `cutoff`.
     pub fn build(s: &Structure<'_, T>, cutoff: T, algo: Algorithm) -> Result<Self, Error> {
+        // The atom count alone may exceed the work bound; check it before
+        // allocating per-atom buffers.
+        match algo {
+            Algorithm::Naive => naive::check_work(s.positions.len(), [0; 3])?,
+        }
         let p = Prepared::new(s, cutoff)?;
         let mut nl = Self {
             row_offsets: vec![0],
@@ -56,7 +62,7 @@ impl<T: Real> NeighborList<T> {
             distances: Vec::new(),
         };
         match algo {
-            Algorithm::Naive => naive::search(&p, &mut nl),
+            Algorithm::Naive => naive::search(&p, &mut nl)?,
         }
         Ok(nl)
     }
@@ -114,6 +120,13 @@ const MAX_WRAP: f64 = (1 << 16) as f64;
 /// error in the fractional coordinates of both atoms of a pair.
 const IMAGE_MARGIN: f64 = 1e-2;
 
+/// Lower bound on `r_c / L` with a cell. Edge vectors sum terms up to about
+/// `2²⁰·L` (positions within [`MAX_WRAP`] cells, shifts within
+/// [`MAX_IMAGES`]), so they are off by about `ε·2²⁰·L ≈ 2e-10·L`; with this
+/// bound that is below `1e-5·r_c`, and only pairs that close to the cutoff can
+/// be misclassified.
+const MIN_CUTOFF_PER_LENGTH: f64 = 1e-4;
+
 /// Validated input in f64 and the cell images each atom wraps by.
 pub(crate) struct Prepared {
     positions: Vec<[f64; 3]>,
@@ -158,6 +171,14 @@ impl Prepared {
         // Cell<T> made the same f64 computation, so this cell is accepted too.
         let cell = Cell::from_rows(cell.rows().map(|r| r.map(T::to_f64)))
             .expect("a cell accepted in T is accepted in f64");
+        let length = cell
+            .rows()
+            .iter()
+            .map(|r| (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt())
+            .fold(0.0, f64::max);
+        if cutoff < MIN_CUTOFF_PER_LENGTH * length {
+            return Err(Error::InvalidCutoff);
+        }
         let heights = cell.heights();
         let reach: [f64; 3] = core::array::from_fn(|a| {
             if s.pbc[a] {

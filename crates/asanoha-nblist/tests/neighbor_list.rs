@@ -414,26 +414,32 @@ fn f32_large_cell_keeps_small_separations() {
         [[1.0, 0.0, 0.0], [1e8, 0.0, 0.0]],
     ] {
         for algo in ALGORITHMS {
-            let nl = build(&pos, Some(&c), ALL, 0.5, algo).unwrap();
-            assert_eq!(nl.n_edges(), 0, "{algo:?}");
-            let nl = build(&pos, Some(&c), ALL, 1.5, algo).unwrap();
+            let nl = build(&pos, Some(&c), ALL, 1e4, algo).unwrap();
             assert_eq!(nl.distances, [1.0, 1.0], "{algo:?}");
         }
     }
 }
 
 fn check_skewed_cell_far_atom<T: Real>() {
-    // det = 4e-6 is just above 1e-6·|b|³ ≈ 2.8e-6. Atom 0 sits on the image of
-    // atom 1 at S = (2¹⁶, 0, 0), the farthest accepted wrap; the next images
-    // are 4e-6 away.
+    // det = 4e-6 is just above 1e-6·|b|³ ≈ 2.8e-6, and the cutoff 1.5e-4 is
+    // just above 1e-4·|b|. Atom 0 sits on the image of atom 1 at
+    // S = (2¹⁶, 0, 0), the farthest accepted wrap. a − b = (0, −4e-6, 0), so
+    // the images at S + k·(1, −1, 0) with |k| ≤ 37 are within the cutoff, for
+    // both pairs and for the self-images.
     let rows = [[1.0, 1.0, 0.0], [1.0, 1.0 + 4e-6, 0.0], [0.0, 0.0, 1.0]];
     let c = Cell::from_rows(rows.map(|r| r.map(T::from_f64))).unwrap();
     let pos = [[65536.0, 65536.0, 0.0], [0.0; 3]].map(|r| r.map(T::from_f64));
+    let mut expected = Vec::new();
+    for (i, j, x) in [(0, 0, 0), (0, 1, 65536), (1, 0, -65536), (1, 1, 0)] {
+        for k in -37..=37 {
+            if x != 0 || k != 0 {
+                expected.push((i, j, [x + k, -k, 0]));
+            }
+        }
+    }
     for algo in ALGORITHMS {
-        let nl = build(&pos, Some(&c), ALL, T::from_f64(1.1e-8), algo).unwrap();
-        let expected = [(0, 1, [65536, 0, 0]), (1, 0, [-65536, 0, 0])];
+        let nl = build(&pos, Some(&c), ALL, T::from_f64(1.5e-4), algo).unwrap();
         assert_eq!(triples(&nl), expected, "{algo:?}");
-        assert_eq!(nl.distances, [T::ZERO; 2], "{algo:?}");
     }
 }
 
@@ -450,8 +456,33 @@ fn skewed_cell_far_atom() {
     let r = [1e14, 1e14 * 1.000004, 0.0];
     let pos = [r, [r[0] + 2.0, r[1] + 2.0, 0.0]];
     for algo in ALGORITHMS {
-        let nl = build(&pos, Some(&c), WIRE, 1.1e-8, algo);
+        let nl = build(&pos, Some(&c), WIRE, 1.5e-4, algo);
         assert_eq!(nl, Err(Error::InvalidPosition(0)), "{algo:?}");
+    }
+}
+
+#[test]
+fn rejects_cutoff_below_cell_resolution() {
+    // A shift of about ±65535 in this cell sums terms of about 4e12, whose
+    // rounding (about 4e-4) would exceed a cutoff of 1e-8.
+    let c = cell([
+        [63251177.551587075, 0.0, 0.0],
+        [63250948.51293027, 200.0, 0.0],
+        [0.0, 0.0, 63251177.551587075],
+    ]);
+    let pos = [[0.0; 3], [15010048.373940848, -13107000.0, 0.0]];
+    for algo in ALGORITHMS {
+        assert_eq!(
+            build(&pos, Some(&c), ALL, 1e-8, algo),
+            Err(Error::InvalidCutoff)
+        );
+        // 1e-4·L is accepted; below it is not.
+        let c10 = Cell::cubic(10.0);
+        assert!(build(&pos[..1], Some(&c10), ALL, 1e-3, algo).is_ok());
+        assert_eq!(
+            build(&pos[..1], Some(&c10), ALL, 0.99e-3, algo),
+            Err(Error::InvalidCutoff)
+        );
     }
 }
 
@@ -640,4 +671,20 @@ fn rejects_invalid_input() {
             Err(Error::MissingCell)
         );
     }
+}
+
+#[test]
+fn naive_rejects_too_much_work() {
+    // 100 atoms with ceil(147/3 + 0.01) = 50 images per axis: 10⁴·101³ > 2²⁷.
+    let pos = [[0.0; 3]; 100];
+    let r = build(&pos, Some(&Cell::cubic(3.0)), ALL, 147.0, Algorithm::Naive);
+    assert_eq!(r, Err(Error::TooMuchWork));
+    // One image per axis: 2230²·27 > 2²⁷ ≥ 2229²·27.
+    let pos = [[0.0; 3]; 2230];
+    let r = build(&pos, Some(&Cell::cubic(10.0)), ALL, 3.0, Algorithm::Naive);
+    assert_eq!(r, Err(Error::TooMuchWork));
+    // No images: 11586² > 2²⁷ ≥ 11585².
+    let pos = vec![[0.0; 3]; 11586];
+    let r = build(&pos, None, NONE, 3.0, Algorithm::Naive);
+    assert_eq!(r, Err(Error::TooMuchWork));
 }
