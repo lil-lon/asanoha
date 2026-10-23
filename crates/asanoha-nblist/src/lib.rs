@@ -4,6 +4,7 @@
 #![deny(missing_docs)]
 
 mod cell;
+mod cell_list;
 mod error;
 mod naive;
 mod neighbor_list;
