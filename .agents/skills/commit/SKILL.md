@@ -11,4 +11,4 @@ description: Use before creating any git commit in this repository. Runs `codex 
    ```
 
 3. If the review reports any P0, P1, or P2 finding, fix it, `git add` the fixed files, and go back to step 2. Do not commit while a P0-P2 finding remains.
-4. Commit with a one-line subject and a body of zero or one sentence. Trailers such as `Co-Authored-By` do not count toward the body.
+4. Commit with a one-line subject and no body. Trailers such as `Co-Authored-By` are not a body.
