@@ -118,6 +118,19 @@ fn no_atoms() {
 }
 
 #[test]
+fn extent_beyond_f64_range() {
+    // The extent along x, 2e308, overflows f64.
+    let pos = [
+        [-1e308, 0.0, 0.0],
+        [1e308, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ];
+    let expected = both(&[(2, 3, [0, 0, 0], 1.0)]);
+    check(&pos, None, NONE, 2.0, &expected);
+}
+
+#[test]
 fn no_neighbors() {
     let pos = [[0.0, 0.0, 0.0], [5.0, 5.0, 5.0]];
     check(&pos, Some(&Cell::cubic(20.0)), ALL, 1.0, &[]);
@@ -527,8 +540,8 @@ fn random_cell(rng: &mut XorShift64) -> Cell<f64> {
 #[test]
 fn cell_list_matches_naive() {
     // Cutoffs log-uniform from 0.03 to 2 times the smallest cell height, so
-    // that the bins range from many per axis, capped by the atom count, to a
-    // single bin with several images. Up to 200 atoms below half the height,
+    // that the bins range from many per axis, most of them empty, to a single
+    // bin with several images. Up to 200 atoms below half the height,
     // 12 above, in a box of 0.1 to 4 cells along each axis.
     let mut rng = XorShift64::new(37);
     for _ in 0..100 {
@@ -762,4 +775,16 @@ fn cell_list_large_sparse() {
     let (near, diagonal) = (2.0, 8f64.sqrt());
     assert!(nl.distances.iter().all(|&d| d == near || d == diagonal));
     check_vectors(&nl, &pos, Some(&c));
+}
+
+#[test]
+fn cell_list_sparse_diagonal() {
+    // 10⁵ atoms 4√3 apart on the diagonal of a bounding box 4·10⁵ wide: the
+    // occupied bins are a vanishing fraction of the box. Each atom neighbors
+    // the next and the previous one.
+    let n = 100_000;
+    let pos: Vec<[f64; 3]> = (0..n).map(|i| [4.0 * i as f64; 3]).collect();
+    let nl = build(&pos, None, NONE, 7.0, Algorithm::CellList).unwrap();
+    assert!((0..n).all(|i| nl.edges_of(i).len() == if i == 0 || i == n - 1 { 1 } else { 2 }));
+    check_vectors(&nl, &pos, None);
 }

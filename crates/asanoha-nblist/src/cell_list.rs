@@ -61,12 +61,14 @@ impl Axis {
     }
 }
 
-/// The atoms sorted into bins.
+/// The atoms sorted into bins; only occupied bins are stored.
 struct Bins {
     axes: [Axis; 3],
     /// Bin of each atom along each axis.
     coords: Vec<[usize; 3]>,
-    /// The atoms of bin `k` are `atoms[offsets[k]..offsets[k + 1]]`, in
+    /// The occupied bins in increasing order.
+    keys: Vec<[usize; 3]>,
+    /// The atoms of bin `keys[k]` are `atoms[offsets[k]..offsets[k + 1]]`, in
     /// increasing order.
     offsets: Vec<usize>,
     atoms: Vec<usize>,
@@ -74,8 +76,7 @@ struct Bins {
 
 impl Bins {
     /// Bins at least `reach` wide, so that the search spans one bin on each
-    /// side of an axis longer than the reach, with the total bin count capped
-    /// at the atom count.
+    /// side of an axis longer than the reach.
     fn new(p: &Prepared) -> Self {
         let f = &p.fractional;
         // `(lo, span)`: non-periodic axes are binned over the atoms' extent.
@@ -88,49 +89,41 @@ impl Bins {
                 (lo, hi - lo)
             }
         });
-        let limit = p.n_atoms().max(1);
-        let mut n: [usize; 3] =
-            core::array::from_fn(|a| ((range[a].1 / p.reach[a]) as usize).clamp(1, limit));
-        while n.iter().map(|&x| x as u128).product::<u128>() > limit as u128 {
-            let a = (0..3).max_by_key(|&a| n[a]).unwrap();
-            n[a] /= 2;
-        }
-        let axes: [Axis; 3] =
-            core::array::from_fn(|a| Axis::new(p.pbc[a], range[a].0, range[a].1, n[a], p.reach[a]));
+        let axes: [Axis; 3] = core::array::from_fn(|a| {
+            // The cast saturates at u32::MAX bins, beyond any physical extent,
+            // so that bin indices fit in i64 even if the span overflows.
+            let n = ((range[a].1 / p.reach[a]) as u32).max(1) as usize;
+            Axis::new(p.pbc[a], range[a].0, range[a].1, n, p.reach[a])
+        });
         let coords: Vec<[usize; 3]> = f
             .iter()
             .map(|x| core::array::from_fn(|a| axes[a].bin(x[a])))
             .collect();
-        let mut offsets = vec![0; n[0] * n[1] * n[2] + 1];
-        let mut bins = Self {
+        // The sort is stable, so the atoms of a bin stay in increasing order.
+        let mut atoms: Vec<usize> = (0..f.len()).collect();
+        atoms.sort_by_key(|&i| coords[i]);
+        let (mut keys, mut offsets) = (Vec::new(), Vec::new());
+        for (k, &i) in atoms.iter().enumerate() {
+            if keys.last() != Some(&coords[i]) {
+                keys.push(coords[i]);
+                offsets.push(k);
+            }
+        }
+        offsets.push(atoms.len());
+        Self {
             axes,
             coords,
-            offsets: Vec::new(),
-            atoms: vec![0; f.len()],
-        };
-        for &c in &bins.coords {
-            offsets[bins.index(c) + 1] += 1;
+            keys,
+            offsets,
+            atoms,
         }
-        for k in 1..offsets.len() {
-            offsets[k] += offsets[k - 1];
-        }
-        let mut next = offsets.clone();
-        for (i, &c) in bins.coords.iter().enumerate() {
-            let k = bins.index(c);
-            bins.atoms[next[k]] = i;
-            next[k] += 1;
-        }
-        bins.offsets = offsets;
-        bins
-    }
-
-    fn index(&self, c: [usize; 3]) -> usize {
-        c[0] + self.axes[0].n * (c[1] + self.axes[1].n * c[2])
     }
 
     fn atoms_in(&self, c: [usize; 3]) -> &[usize] {
-        let k = self.index(c);
-        &self.atoms[self.offsets[k]..self.offsets[k + 1]]
+        match self.keys.binary_search(&c) {
+            Ok(k) => &self.atoms[self.offsets[k]..self.offsets[k + 1]],
+            Err(_) => &[],
+        }
     }
 
     /// The bins searched from bin `c`, each with the shift `S` of its image.
@@ -147,21 +140,13 @@ impl Bins {
     /// Whether the search checks more than `limit` pairs `(i, j, S)`; stops
     /// counting once it does.
     fn exceeds(&self, limit: f64) -> bool {
-        let [nx, ny, nz] = self.axes.each_ref().map(|a| a.n);
         let mut total = 0.0;
-        for z in 0..nz {
-            for y in 0..ny {
-                for x in 0..nx {
-                    let here = self.atoms_in([x, y, z]).len() as f64;
-                    if here == 0.0 {
-                        continue;
-                    }
-                    for (t, _) in self.neighbors([x, y, z]) {
-                        total += here * self.atoms_in(t).len() as f64;
-                        if total > limit {
-                            return true;
-                        }
-                    }
+        for (k, &c) in self.keys.iter().enumerate() {
+            let here = (self.offsets[k + 1] - self.offsets[k]) as f64;
+            for (t, _) in self.neighbors(c) {
+                total += here * self.atoms_in(t).len() as f64;
+                if total > limit {
+                    return true;
                 }
             }
         }
@@ -250,25 +235,31 @@ mod tests {
         assert_eq!(bin_counts(&line, Some(&c), [false; 3], 3.0), [3, 1, 1]);
         assert_eq!(bin_counts(&line, None, [false; 3], 3.0), [3, 1, 1]);
         // A large offset along x leaves the bins along y as wide as the
-        // cutoff.
+        // cutoff: extent 76, less one bin as the rounding margin widens the
+        // reach.
         let pos: Vec<[f64; 3]> = (0..20).map(|i| [1e20, 4.0 * i as f64, 0.0]).collect();
-        assert_eq!(bin_counts(&pos, None, [false; 3], 1.0), [1, 20, 1]);
-        // Periodic y and z start at 33 bins each; halving the largest axis
-        // stops at 3·2·2 ≤ 20.
+        assert_eq!(bin_counts(&pos, None, [false; 3], 1.0), [1, 75, 1]);
+        // Periodic y and z have 33 bins each, more in total than atoms.
         assert_eq!(
             bin_counts(&line, Some(&c), [false, true, true], 3.0),
-            [3, 2, 2]
+            [3, 33, 33]
         );
     }
 
     #[test]
-    fn bin_count_capped_at_atom_count() {
-        // 10 bins per axis by height; the largest axis is halved until at
-        // most 2 bins remain.
-        let pos = [[0.0; 3], [1.0; 3]];
-        let c = Cell::cubic(30.0);
-        assert_eq!(bin_counts(&pos, Some(&c), [true; 3], 3.0), [2, 1, 1]);
-        assert_eq!(bin_counts(&[], Some(&c), [true; 3], 3.0), [1, 1, 1]);
+    fn only_occupied_bins_are_stored() {
+        let pos = [[0.0; 3], [1.0; 3], [20.0; 3]];
+        let s = Structure {
+            positions: &pos,
+            cell: Some(&Cell::cubic(30.0)),
+            pbc: [true; 3],
+        };
+        let bins = Bins::new(&Prepared::new(&s, 3.0).unwrap());
+        assert_eq!(bins.axes.each_ref().map(|a| a.n), [9; 3]);
+        assert_eq!(bins.keys, [[0; 3], [6; 3]]);
+        assert_eq!(bins.atoms_in([0; 3]), [0, 1]);
+        assert_eq!(bins.atoms_in([6; 3]), [2]);
+        assert_eq!(bins.atoms_in([1; 3]), []);
         assert_eq!(bin_counts(&[], None, [false; 3], 3.0), [1, 1, 1]);
     }
 }

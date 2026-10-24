@@ -22,8 +22,8 @@ pub enum Algorithm {
     /// with [`Error::TooMuchWork`] beyond 2²⁷ pair images.
     Naive,
     /// Bins the atoms by fractional coordinates into bins at least as wide
-    /// as the cutoff, at most one bin per atom, and checks only pairs in
-    /// nearby bins; O(N + E) at bounded density. The output equals
+    /// as the cutoff, stores only the occupied bins, and checks only pairs in
+    /// nearby bins; O(N log N + E) at bounded density. The output equals
     /// [`Algorithm::Naive`]'s. Fails with [`Error::TooMuchWork`] beyond
     /// `max(2²⁷, 2¹²·N)` pairs checked.
     CellList,
