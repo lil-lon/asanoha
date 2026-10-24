@@ -6,7 +6,7 @@ use crate::{Error, NeighborList};
 /// Bound on the pair images checked, `N²·Π(2·images[a] + 1)`. It bounds the
 /// time and the output of the search; the naive search is meant for small
 /// structures.
-const MAX_CANDIDATES: f64 = (1 << 27) as f64;
+pub(crate) const MAX_CANDIDATES: f64 = (1 << 27) as f64;
 
 /// Fails with [`Error::TooMuchWork`] if `n` atoms with image radius `images`
 /// exceed [`MAX_CANDIDATES`].

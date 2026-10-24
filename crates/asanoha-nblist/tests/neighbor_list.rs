@@ -7,7 +7,7 @@ use asanoha_core::testing::XorShift64;
 use asanoha_core::{Real, assert_close};
 use asanoha_nblist::{Algorithm, Cell, Error, NeighborList, Structure};
 
-const ALGORITHMS: [Algorithm; 1] = [Algorithm::Naive];
+const ALGORITHMS: [Algorithm; 2] = [Algorithm::Naive, Algorithm::CellList];
 
 const ALL: [bool; 3] = [true; 3];
 const SLAB: [bool; 3] = [true, true, false];
@@ -109,6 +109,25 @@ fn basic() {
     ];
     let expected = both(&[(0, 1, [0, 0, 0], 2.0), (0, 3, [-1, 0, 0], 2.0)]);
     check(&pos, Some(&Cell::cubic(10.0)), ALL, 3.0, &expected);
+}
+
+#[test]
+fn no_atoms() {
+    check(&[], Some(&Cell::cubic(10.0)), ALL, 3.0, &[]);
+    check(&[], None, NONE, 3.0, &[]);
+}
+
+#[test]
+fn extent_beyond_f64_range() {
+    // The extent along x, 2e308, overflows f64.
+    let pos = [
+        [-1e308, 0.0, 0.0],
+        [1e308, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ];
+    let expected = both(&[(2, 3, [0, 0, 0], 1.0)]);
+    check(&pos, None, NONE, 2.0, &expected);
 }
 
 #[test]
@@ -490,16 +509,7 @@ fn rejects_cutoff_below_cell_resolution() {
 /// fractional coordinates in [−1.5, 2.5), random periodicity, and a cutoff
 /// from 0.3 to 1.5 times the cell heights.
 fn random_structure(rng: &mut XorShift64) -> (Vec<[f64; 3]>, Cell<f64>, [bool; 3], f64) {
-    let rows = core::array::from_fn(|i| {
-        core::array::from_fn(|k| {
-            if i == k {
-                3.0 + 3.0 * rng.next_f64()
-            } else {
-                2.0 * rng.next_f64() - 1.0
-            }
-        })
-    });
-    let c = cell(rows);
+    let c = random_cell(rng);
     let n = 1 + (rng.next_u64() % 12) as usize;
     let pos = (0..n)
         .map(|_| c.to_cartesian(core::array::from_fn(|_| 4.0 * rng.next_f64() - 1.5)))
@@ -512,6 +522,47 @@ fn random_structure(rng: &mut XorShift64) -> (Vec<[f64; 3]>, Cell<f64>, [bool; 3
     );
     let cutoff = lo + (hi - lo) * rng.next_f64();
     (pos, c, pbc, cutoff)
+}
+
+/// Random triclinic cell with edges 3–6 and skew up to ±1.
+fn random_cell(rng: &mut XorShift64) -> Cell<f64> {
+    cell(core::array::from_fn(|i| {
+        core::array::from_fn(|k| {
+            if i == k {
+                3.0 + 3.0 * rng.next_f64()
+            } else {
+                2.0 * rng.next_f64() - 1.0
+            }
+        })
+    }))
+}
+
+#[test]
+fn cell_list_matches_naive() {
+    // Cutoffs log-uniform from 0.03 to 2 times the smallest cell height, so
+    // that the bins range from many per axis, most of them empty, to a single
+    // bin with several images. Up to 200 atoms below half the height,
+    // 12 above, in a box of 0.1 to 4 cells along each axis.
+    let mut rng = XorShift64::new(37);
+    for _ in 0..100 {
+        let c = random_cell(&mut rng);
+        let h = c.heights();
+        let h_min = h[0].min(h[1]).min(h[2]);
+        let cutoff = 0.03 * h_min * (2.0f64 / 0.03).powf(rng.next_f64());
+        let max_atoms = if cutoff < 0.5 * h_min { 200 } else { 12 };
+        let n = 1 + (rng.next_u64() % max_atoms) as usize;
+        let lo: [f64; 3] = core::array::from_fn(|_| 3.0 * rng.next_f64() - 2.0);
+        let width: [f64; 3] = core::array::from_fn(|_| 0.1 + 3.9 * rng.next_f64());
+        let pos: Vec<[f64; 3]> = (0..n)
+            .map(|_| c.to_cartesian(core::array::from_fn(|a| lo[a] + width[a] * rng.next_f64())))
+            .collect();
+        let pbc = core::array::from_fn(|_| rng.next_u64().is_multiple_of(2));
+        for (cell, pbc) in [(Some(&c), pbc), (None, NONE)] {
+            let naive = build(&pos, cell, pbc, cutoff, Algorithm::Naive).unwrap();
+            let cell_list = build(&pos, cell, pbc, cutoff, Algorithm::CellList).unwrap();
+            assert_eq!(cell_list, naive);
+        }
+    }
 }
 
 #[test]
@@ -687,4 +738,53 @@ fn naive_rejects_too_much_work() {
     let pos = vec![[0.0; 3]; 11586];
     let r = build(&pos, None, NONE, 3.0, Algorithm::Naive);
     assert_eq!(r, Err(Error::TooMuchWork));
+}
+
+#[test]
+fn cell_list_rejects_too_much_work() {
+    // 100 coincident atoms in one bin searched over 101³ images: 10⁴·101³
+    // pairs exceed 2²⁷.
+    let pos = [[0.0; 3]; 100];
+    let r = build(
+        &pos,
+        Some(&Cell::cubic(3.0)),
+        ALL,
+        147.0,
+        Algorithm::CellList,
+    );
+    assert_eq!(r, Err(Error::TooMuchWork));
+    // Coincident atoms share one bin: 11586² pairs exceed
+    // max(2²⁷, 2¹²·11586) = 2²⁷.
+    let pos = vec![[0.0; 3]; 11586];
+    let r = build(&pos, None, NONE, 3.0, Algorithm::CellList);
+    assert_eq!(r, Err(Error::TooMuchWork));
+}
+
+#[test]
+fn cell_list_large_sparse() {
+    // A simple cubic lattice of 16³ atoms with spacing 2, beyond the naive
+    // work bound. Within 3 each atom has 6 neighbors at 2 and 12 at √8.
+    let pos: Vec<[f64; 3]> = (0..4096)
+        .map(|i| [i % 16, i / 16 % 16, i / 256].map(|x| 2.0 * x as f64))
+        .collect();
+    let c = Cell::cubic(32.0);
+    let r = build(&pos, Some(&c), ALL, 3.0, Algorithm::Naive);
+    assert_eq!(r, Err(Error::TooMuchWork));
+    let nl = build(&pos, Some(&c), ALL, 3.0, Algorithm::CellList).unwrap();
+    assert!((0..4096).all(|i| nl.edges_of(i).len() == 18));
+    let (near, diagonal) = (2.0, 8f64.sqrt());
+    assert!(nl.distances.iter().all(|&d| d == near || d == diagonal));
+    check_vectors(&nl, &pos, Some(&c));
+}
+
+#[test]
+fn cell_list_sparse_diagonal() {
+    // 10⁵ atoms 4√3 apart on the diagonal of a bounding box 4·10⁵ wide: the
+    // occupied bins are a vanishing fraction of the box. Each atom neighbors
+    // the next and the previous one.
+    let n = 100_000;
+    let pos: Vec<[f64; 3]> = (0..n).map(|i| [4.0 * i as f64; 3]).collect();
+    let nl = build(&pos, None, NONE, 7.0, Algorithm::CellList).unwrap();
+    assert!((0..n).all(|i| nl.edges_of(i).len() == if i == 0 || i == n - 1 { 1 } else { 2 }));
+    check_vectors(&nl, &pos, None);
 }
