@@ -676,6 +676,27 @@ fn f32_matches_f64() {
 }
 
 #[test]
+fn receivers_and_sender_permutation() {
+    let mut rng = XorShift64::new(43);
+    for _ in 0..50 {
+        let (pos, c, pbc, cutoff) = random_structure(&mut rng);
+        let nl = build(&pos, Some(&c), pbc, cutoff, Algorithm::CellList).unwrap();
+        let receivers: Vec<u32> = nl.receivers().collect();
+        let expected: Vec<u32> = triples(&nl).iter().map(|t| t.0).collect();
+        assert_eq!(receivers, expected);
+        let perm = nl.sender_permutation();
+        let mut sorted = perm.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..nl.n_edges()).collect::<Vec<_>>());
+        for j in 0..nl.n_atoms() {
+            let edges = &perm[nl.edges_of(j)];
+            assert!(edges.iter().all(|&e| nl.senders[e] == j as u32));
+            assert!(edges.windows(2).all(|w| w[0] < w[1]));
+        }
+    }
+}
+
+#[test]
 fn rejects_invalid_input() {
     let pos = [[0.0, 0.0, 0.0], [1.0, f64::NAN, 0.0]];
     let c = Cell::cubic(3.0);

@@ -89,6 +89,25 @@ impl<T: Real> NeighborList<T> {
         self.row_offsets[i]..self.row_offsets[i + 1]
     }
 
+    /// Receiver `i` per edge.
+    pub fn receivers(&self) -> impl Iterator<Item = u32> + '_ {
+        (0..self.n_atoms()).flat_map(|i| core::iter::repeat_n(i as u32, self.edges_of(i).len()))
+    }
+
+    /// Edge ids grouped by sender: the edges whose sender is `j` are
+    /// `perm[row_offsets[j]..row_offsets[j + 1]]`, in increasing order. Each
+    /// edge's reverse is in the list, so atom `j` sends as many edges as it
+    /// receives.
+    pub fn sender_permutation(&self) -> Vec<usize> {
+        let mut next = self.row_offsets[..self.n_atoms()].to_vec();
+        let mut perm = vec![0; self.n_edges()];
+        for (e, &j) in self.senders.iter().enumerate() {
+            perm[next[j as usize]] = e;
+            next[j as usize] += 1;
+        }
+        perm
+    }
+
     /// Appends an edge from `j` to the current row.
     pub(crate) fn push(&mut self, j: usize, e: Edge) {
         self.senders.push(j as u32);
