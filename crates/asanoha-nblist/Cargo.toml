@@ -10,3 +10,7 @@ asanoha-core = { path = "../asanoha-core" }
 
 [dev-dependencies]
 asanoha-core = { path = "../asanoha-core", features = ["testing"] }
+
+[[bench]]
+name = "nblist"
+harness = false
