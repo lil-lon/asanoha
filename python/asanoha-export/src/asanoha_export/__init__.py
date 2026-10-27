@@ -1,0 +1,1 @@
+"""Fixture generators for asanoha."""
