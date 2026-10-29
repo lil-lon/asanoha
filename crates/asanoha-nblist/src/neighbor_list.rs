@@ -54,24 +54,83 @@ pub struct NeighborList<T: Real> {
 impl<T: Real> NeighborList<T> {
     /// Builds the list of pairs closer than `cutoff`.
     pub fn build(s: &Structure<'_, T>, cutoff: T, algo: Algorithm) -> Result<Self, Error> {
+        let mut nl = Self::empty();
+        nl.build_into(s, cutoff, algo)?;
+        Ok(nl)
+    }
+
+    /// [`NeighborList::build`] into `self`, reusing the capacity of its
+    /// vectors. On error `self` is left empty, with no atoms.
+    pub fn build_into(
+        &mut self,
+        s: &Structure<'_, T>,
+        cutoff: T,
+        algo: Algorithm,
+    ) -> Result<(), Error> {
+        let result = self.fill(s, cutoff, algo);
+        if result.is_err() {
+            *self = Self::empty();
+        }
+        result
+    }
+
+    /// A list with no atoms.
+    fn empty() -> Self {
+        Self {
+            row_offsets: vec![0],
+            senders: Vec::new(),
+            shifts: Vec::new(),
+            vectors: Vec::new(),
+            distances: Vec::new(),
+        }
+    }
+
+    /// [`NeighborList::build_into`] before the error handling. The edge
+    /// vectors keep their contents until the search sizes or clears them.
+    fn fill(&mut self, s: &Structure<'_, T>, cutoff: T, algo: Algorithm) -> Result<(), Error> {
+        self.row_offsets.clear();
+        self.row_offsets.push(0);
         // The atom count alone may exceed the work bound; check it before
         // allocating per-atom buffers.
         if algo == Algorithm::Naive {
             naive::check_work(s.positions.len(), [0; 3])?;
         }
         let p = Prepared::new(s, cutoff)?;
-        let mut nl = Self {
-            row_offsets: vec![0],
-            senders: Vec::new(),
-            shifts: Vec::new(),
-            vectors: Vec::new(),
-            distances: Vec::new(),
-        };
         match algo {
-            Algorithm::Naive => naive::search(&p, &mut nl)?,
-            Algorithm::CellList => cell_list::search(&p, &mut nl)?,
+            Algorithm::Naive => {
+                self.truncate_edges(0);
+                naive::search(&p, self)
+            }
+            Algorithm::CellList => cell_list::search(&p, self),
         }
-        Ok(nl)
+    }
+
+    /// Keeps the first `n` entries of each edge vector.
+    fn truncate_edges(&mut self, n: usize) {
+        self.senders.truncate(n);
+        self.shifts.truncate(n);
+        self.vectors.truncate(n);
+        self.distances.truncate(n);
+    }
+
+    /// Sizes the edge vectors to `row_offsets`, after which every edge is to
+    /// be written once with [`NeighborList::set`]. Entries kept from the
+    /// previous contents are not cleared.
+    pub(crate) fn size_edges(&mut self) {
+        let n = self.row_offsets[self.row_offsets.len() - 1];
+        self.truncate_edges(n);
+        self.senders.resize(n, 0);
+        self.shifts.resize(n, [0; 3]);
+        self.vectors.resize(n, [T::ZERO; 3]);
+        self.distances.resize(n, T::ZERO);
+    }
+
+    /// Sets edge `k` to `e` from `j`.
+    pub(crate) fn set(&mut self, k: usize, j: usize, e: &Edge) {
+        self.senders[k] = j as u32;
+        self.shifts[k] = e.shift;
+        self.vectors[k] = e.vector.map(T::from_f64);
+        self.distances[k] = T::from_f64(e.distance);
     }
 
     /// Number of atoms.
@@ -129,6 +188,19 @@ pub(crate) struct Edge {
     distance: f64,
 }
 
+impl Edge {
+    /// The edge in the opposite direction, as [`Prepared::edge`] computes it:
+    /// negating the shift negates `S·H` exactly, and `r_i − r_j` is exactly
+    /// `−(r_j − r_i)`, so the vector is exactly negated.
+    pub(crate) fn reversed(&self) -> Self {
+        Self {
+            shift: self.shift.map(|x| -x),
+            vector: self.vector.map(|x| -x),
+            distance: self.distance,
+        }
+    }
+}
+
 /// Accepted cutoffs, the range of accepted cell lengths. Every distance that
 /// passes the cutoff test is then representable in f32.
 const CUTOFF_RANGE: RangeInclusive<f64> = 1e-8..=1e8;
@@ -156,6 +228,13 @@ const MIN_CUTOFF_PER_LENGTH: f64 = 1e-4;
 /// Relative bound on the rounding error of edge vectors and cell heights;
 /// see [`MIN_CUTOFF_PER_LENGTH`].
 const VECTOR_ERROR: f64 = 1e-5;
+
+/// Relative widening of the cutoff in [`Prepared::near_sq`]. Positions within
+/// [`MAX_WRAP`] cells and shifts within [`MAX_IMAGES`] keep every term of
+/// `(r'_j + S·H) − r'_i` with `r' = r − w·H` below about `2²¹·L`, so it and
+/// the vector of [`Prepared::edge`] are within about `10·ε·2²¹·L ≈ 5e-9·L` of
+/// the true vector, below `1e-4·r_c` by [`MIN_CUTOFF_PER_LENGTH`].
+const NEAR_MARGIN: f64 = 1e-3;
 
 /// Bound on the rounding error of a computed fractional coordinate, per unit
 /// of `κ·(F + 1)`, where `κ = L³/V` bounds `L·|H⁻¹|` and `F` bounds `|r·H⁻¹|`.
@@ -277,19 +356,37 @@ impl Prepared {
         self.positions.len()
     }
 
+    /// `r − w·H`: atom `i` wrapped into the cell.
+    pub(crate) fn wrapped(&self, i: usize) -> [f64; 3] {
+        let t = self.translation(self.wraps[i]);
+        core::array::from_fn(|k| self.positions[i][k] - t[k])
+    }
+
+    /// `S·H`.
+    pub(crate) fn translation(&self, s: [i32; 3]) -> [f64; 3] {
+        let h = &self.rows;
+        let s = s.map(f64::from);
+        core::array::from_fn(|k| s[0] * h[0][k] + s[1] * h[1][k] + s[2] * h[2][k])
+    }
+
+    /// Square of the cutoff widened by [`NEAR_MARGIN`]: every pair that
+    /// [`Prepared::edge`] accepts has `|(r'_j + S·H) − r'_i|²` below it, for
+    /// [`Prepared::wrapped`] `r'` and [`Prepared::translation`] `S·H`.
+    /// Without a cell both vectors are `r_j − r_i`.
+    pub(crate) fn near_sq(&self) -> f64 {
+        self.cutoff_sq * (1.0 + NEAR_MARGIN) * (1.0 + NEAR_MARGIN)
+    }
+
     /// The edge from `j` shifted by `S` to `i`, if closer than the cutoff.
     /// `S` is relative to the wrapped positions.
     pub(crate) fn edge(&self, i: usize, j: usize, s: [i32; 3]) -> Option<Edge> {
-        let shift: [i32; 3] = core::array::from_fn(|a| s[a] + self.wraps[i][a] - self.wraps[j][a]);
+        let shift: [i32; 3] = core::array::from_fn(|k| s[k] + self.wraps[i][k] - self.wraps[j][k]);
         // From the input positions, so that the difference of nearby atoms is
         // exact. Negating the shift negates the translation exactly, so the
         // reverse edge gets exactly −r.
-        let t = shift.map(f64::from);
-        let h = &self.rows;
+        let t = self.translation(shift);
         let (ri, rj) = (self.positions[i], self.positions[j]);
-        let v: [f64; 3] = core::array::from_fn(|k| {
-            (rj[k] - ri[k]) + (t[0] * h[0][k] + t[1] * h[1][k] + t[2] * h[2][k])
-        });
+        let v: [f64; 3] = core::array::from_fn(|k| (rj[k] - ri[k]) + t[k]);
         let d2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
         (d2 < self.cutoff_sq).then(|| Edge {
             shift,

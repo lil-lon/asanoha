@@ -1,3 +1,5 @@
+use core::ops::{Range, RangeInclusive};
+
 use asanoha_core::Real;
 
 use crate::naive::MAX_CANDIDATES;
@@ -50,107 +52,156 @@ impl Axis {
 
     /// The bins searched from bin `b`, each with the shift `S` of its image.
     fn targets(&self, b: usize) -> impl Iterator<Item = (usize, i32)> + '_ {
+        self.runs(b).flat_map(|(bins, s)| bins.map(move |c| (c, s)))
+    }
+
+    /// [`Axis::targets`] as runs of consecutive bins with the same shift.
+    fn runs(&self, b: usize) -> impl Iterator<Item = (RangeInclusive<usize>, i32)> {
         let (n, b) = (self.n as i64, b as i64);
-        (b - self.search..=b + self.search).filter_map(move |raw| {
-            if self.periodic {
-                Some((raw.rem_euclid(n) as usize, raw.div_euclid(n) as i32))
-            } else {
-                (0..n).contains(&raw).then_some((raw as usize, 0))
-            }
+        let (lo, hi) = if self.periodic {
+            (b - self.search, b + self.search)
+        } else {
+            ((b - self.search).max(0), (b + self.search).min(n - 1))
+        };
+        (lo.div_euclid(n)..=hi.div_euclid(n)).map(move |s| {
+            let start = lo.max(s * n) - s * n;
+            let end = hi.min(s * n + n - 1) - s * n;
+            (start as usize..=end as usize, s as i32)
         })
     }
 }
 
-/// The atoms sorted into bins; only occupied bins are stored.
+/// Bins at least `reach` wide, so that the search spans one bin on each side
+/// of an axis longer than the reach.
+fn axes(p: &Prepared) -> [Axis; 3] {
+    let f = &p.fractional;
+    core::array::from_fn(|a| {
+        // `(lo, span)`: non-periodic axes are binned over the atoms' extent.
+        let (lo, span) = if p.pbc[a] {
+            (0.0, 1.0)
+        } else {
+            let lo = f.iter().fold(f64::INFINITY, |m, x| x[a].min(m));
+            let hi = f.iter().fold(f64::NEG_INFINITY, |m, x| x[a].max(m));
+            (lo, hi - lo)
+        };
+        // The cast saturates at u32::MAX bins, beyond any physical extent, so
+        // that bin indices fit in i64 even if the span overflows.
+        let n = ((span / p.reach[a]) as u32).max(1) as usize;
+        Axis::new(p.pbc[a], lo, span, n, p.reach[a])
+    })
+}
+
+/// Consecutive bins along `c` with the same shift, searched from another bin
+/// and holding at least one atom.
+struct Target {
+    /// Its atoms, as a range of [`Bins::atoms`].
+    atoms: Range<usize>,
+    /// The shift `S` of its image, relative to the wrapped positions.
+    shift: [i32; 3],
+    /// `S·H`.
+    translation: [f64; 3],
+}
+
+/// The atoms sorted into bins, and for each occupied bin the bins it
+/// searches; empty bins are not stored. Each [`Target`] adds at least one
+/// pair checked, so there are no more targets than pairs checked.
 struct Bins {
-    axes: [Axis; 3],
-    /// Bin of each atom along each axis.
-    coords: Vec<[usize; 3]>,
-    /// The occupied bins in increasing order.
-    keys: Vec<[usize; 3]>,
-    /// The atoms of bin `keys[k]` are `atoms[offsets[k]..offsets[k + 1]]`, in
+    /// The atoms in bin order; the atoms of a bin are consecutive and in
     /// increasing order.
-    offsets: Vec<usize>,
     atoms: Vec<usize>,
+    /// [`Prepared::wrapped`] of `atoms`, in the same order.
+    wrapped: Vec<[f64; 3]>,
+    /// Occupied bin of each atom, numbered in increasing bin order.
+    bin_of: Vec<usize>,
+    /// The bins searched from occupied bin `k`, in runs along `c`, are
+    /// `targets[target_offsets[k]..target_offsets[k + 1]]`.
+    target_offsets: Vec<usize>,
+    targets: Vec<Target>,
 }
 
 impl Bins {
-    /// Bins at least `reach` wide, so that the search spans one bin on each
-    /// side of an axis longer than the reach.
-    fn new(p: &Prepared) -> Self {
-        let f = &p.fractional;
-        // `(lo, span)`: non-periodic axes are binned over the atoms' extent.
-        let range: [(f64, f64); 3] = core::array::from_fn(|a| {
-            if p.pbc[a] {
-                (0.0, 1.0)
-            } else {
-                let lo = f.iter().fold(f64::INFINITY, |m, x| x[a].min(m));
-                let hi = f.iter().fold(f64::NEG_INFINITY, |m, x| x[a].max(m));
-                (lo, hi - lo)
-            }
-        });
-        let axes: [Axis; 3] = core::array::from_fn(|a| {
-            // The cast saturates at u32::MAX bins, beyond any physical extent,
-            // so that bin indices fit in i64 even if the span overflows.
-            let n = ((range[a].1 / p.reach[a]) as u32).max(1) as usize;
-            Axis::new(p.pbc[a], range[a].0, range[a].1, n, p.reach[a])
-        });
-        let coords: Vec<[usize; 3]> = f
+    /// Fails with [`Error::TooMuchWork`] if the search checks more than
+    /// `limit` pairs `(i, j, S)`.
+    fn new(p: &Prepared, limit: f64) -> Result<Self, Error> {
+        let axes = axes(p);
+        let coords: Vec<[usize; 3]> = p
+            .fractional
             .iter()
             .map(|x| core::array::from_fn(|a| axes[a].bin(x[a])))
             .collect();
         // The sort is stable, so the atoms of a bin stay in increasing order.
-        let mut atoms: Vec<usize> = (0..f.len()).collect();
+        let mut atoms: Vec<usize> = (0..coords.len()).collect();
         atoms.sort_by_key(|&i| coords[i]);
         let (mut keys, mut offsets) = (Vec::new(), Vec::new());
-        for (k, &i) in atoms.iter().enumerate() {
+        let mut bin_of = vec![0; atoms.len()];
+        for (m, &i) in atoms.iter().enumerate() {
             if keys.last() != Some(&coords[i]) {
                 keys.push(coords[i]);
-                offsets.push(k);
+                offsets.push(m);
             }
+            bin_of[i] = keys.len() - 1;
         }
         offsets.push(atoms.len());
-        Self {
-            axes,
-            coords,
-            keys,
-            offsets,
+        // The occupied columns [x, y], each with its bins as a range of `keys`.
+        let mut columns: Vec<([usize; 2], Range<usize>)> = Vec::new();
+        for (k, c) in keys.iter().enumerate() {
+            match columns.last_mut() {
+                Some((xy, bins)) if *xy == [c[0], c[1]] => bins.end = k + 1,
+                _ => columns.push(([c[0], c[1]], k..k + 1)),
+            }
+        }
+        let (mut target_offsets, mut targets) = (vec![0], Vec::new());
+        let mut total = 0.0;
+        let [ax, ay, az] = &axes;
+        let mut near = Vec::new();
+        for (xy, bins) in &columns {
+            // The occupied columns searched from this one, with their shifts.
+            near.clear();
+            for (x, sx) in ax.targets(xy[0]) {
+                for (y, sy) in ay.targets(xy[1]) {
+                    if let Ok(m) = columns.binary_search_by_key(&[x, y], |c| c.0) {
+                        near.push((&keys[columns[m].1.clone()], columns[m].1.start, sx, sy));
+                    }
+                }
+            }
+            for k in bins.clone() {
+                let here = (offsets[k + 1] - offsets[k]) as f64;
+                for &(column, start, sx, sy) in &near {
+                    for (z, sz) in az.runs(keys[k][2]) {
+                        let first = start + column.partition_point(|t| t[2] < *z.start());
+                        let last = start + column.partition_point(|t| t[2] <= *z.end());
+                        let atoms = offsets[first]..offsets[last];
+                        if atoms.is_empty() {
+                            continue;
+                        }
+                        total += here * atoms.len() as f64;
+                        if total > limit {
+                            return Err(Error::TooMuchWork);
+                        }
+                        let shift = [sx, sy, sz];
+                        targets.push(Target {
+                            atoms,
+                            shift,
+                            translation: p.translation(shift),
+                        });
+                    }
+                }
+                target_offsets.push(targets.len());
+            }
+        }
+        Ok(Self {
+            wrapped: atoms.iter().map(|&i| p.wrapped(i)).collect(),
             atoms,
-        }
-    }
-
-    fn atoms_in(&self, c: [usize; 3]) -> &[usize] {
-        match self.keys.binary_search(&c) {
-            Ok(k) => &self.atoms[self.offsets[k]..self.offsets[k + 1]],
-            Err(_) => &[],
-        }
-    }
-
-    /// The bins searched from bin `c`, each with the shift `S` of its image.
-    fn neighbors(&self, c: [usize; 3]) -> impl Iterator<Item = ([usize; 3], [i32; 3])> + '_ {
-        let [ax, ay, az] = &self.axes;
-        az.targets(c[2]).flat_map(move |(z, sz)| {
-            ay.targets(c[1]).flat_map(move |(y, sy)| {
-                ax.targets(c[0])
-                    .map(move |(x, sx)| ([x, y, z], [sx, sy, sz]))
-            })
+            bin_of,
+            target_offsets,
+            targets,
         })
     }
 
-    /// Whether the search checks more than `limit` pairs `(i, j, S)`; stops
-    /// counting once it does.
-    fn exceeds(&self, limit: f64) -> bool {
-        let mut total = 0.0;
-        for (k, &c) in self.keys.iter().enumerate() {
-            let here = (self.offsets[k + 1] - self.offsets[k]) as f64;
-            for (t, _) in self.neighbors(c) {
-                total += here * self.atoms_in(t).len() as f64;
-                if total > limit {
-                    return true;
-                }
-            }
-        }
-        false
+    /// The bins searched from the bin of atom `i`.
+    fn targets_of(&self, i: usize) -> &[Target] {
+        let k = self.bin_of[i];
+        &self.targets[self.target_offsets[k]..self.target_offsets[k + 1]]
     }
 }
 
@@ -158,32 +209,93 @@ impl Bins {
 /// Dense structures with bins as wide as the cutoff check a few hundred.
 const CANDIDATES_PER_ATOM: f64 = (1 << 12) as f64;
 
-/// Checks each atom against the atoms in the bins within reach, then sorts
-/// its row into the canonical order `(j, S)`. Fails with
-/// [`Error::TooMuchWork`] beyond `max(MAX_CANDIDATES, CANDIDATES_PER_ATOM·N)`
-/// pairs checked.
+/// Sort key of an edge in the canonical row order `(j, S)`.
+fn row_key(j: usize, s: [i32; 3]) -> u128 {
+    // Flipping the sign bit maps the order of i32 onto that of u32.
+    s.iter().fold(j as u128, |k, &x| {
+        k << 32 | u128::from(x as u32 ^ 0x8000_0000)
+    })
+}
+
+/// The sender `j` of a row key.
+fn sender(key: u128) -> usize {
+    (key >> 96) as usize
+}
+
+/// Computes each pair once, from its lower atom, and writes it and its
+/// reverse; for the self-images of an atom, `S` and `−S`, it computes the
+/// lexicographically positive one. A pair goes through the exact
+/// [`Prepared::edge`] only if its vector from the wrapped positions passes
+/// [`Prepared::near_sq`]. Fails with [`Error::TooMuchWork`] beyond
+/// `max(MAX_CANDIDATES, CANDIDATES_PER_ATOM·N)` pairs checked. Writes into
+/// the empty list `nl`.
 pub(crate) fn search<T: Real>(p: &Prepared, nl: &mut NeighborList<T>) -> Result<(), Error> {
-    let bins = Bins::new(p);
-    if bins.exceeds(MAX_CANDIDATES.max(CANDIDATES_PER_ATOM * p.n_atoms() as f64)) {
-        return Err(Error::TooMuchWork);
-    }
-    let mut row: Vec<(usize, Edge)> = Vec::new();
-    for (i, &c) in bins.coords.iter().enumerate() {
-        for (t, s) in bins.neighbors(c) {
-            for &j in bins.atoms_in(t) {
-                if i == j && s == [0; 3] {
+    let n = p.n_atoms();
+    let bins = Bins::new(p, MAX_CANDIDATES.max(CANDIDATES_PER_ATOM * n as f64))?;
+    let near_sq = p.near_sq();
+    // The edges of atom i to atoms j ≥ i are half[half_offsets[i]..half_offsets[i + 1]],
+    // sorted by (j, S).
+    let mut half: Vec<(u128, Edge)> = Vec::new();
+    let mut half_offsets = Vec::with_capacity(n + 1);
+    half_offsets.push(0);
+    let mut degree = vec![0; n];
+    for i in 0..n {
+        let start = half.len();
+        let ri = p.wrapped(i);
+        for t in bins.targets_of(i) {
+            let r = t.atoms.clone();
+            for (&j, rj) in bins.atoms[r.clone()].iter().zip(&bins.wrapped[r]) {
+                if j < i {
                     continue;
                 }
-                if let Some(e) = p.edge(i, j, s) {
-                    row.push((j, e));
+                let v: [f64; 3] = core::array::from_fn(|k| (rj[k] + t.translation[k]) - ri[k]);
+                if v[0] * v[0] + v[1] * v[1] + v[2] * v[2] >= near_sq
+                    || (j == i && t.shift <= [0; 3])
+                {
+                    continue;
+                }
+                if let Some(e) = p.edge(i, j, t.shift) {
+                    half.push((row_key(j, e.shift), e));
                 }
             }
         }
-        row.sort_unstable_by_key(|(j, e)| (*j, e.shift));
-        for (j, e) in row.drain(..) {
-            nl.push(j, e);
+        half[start..].sort_unstable_by_key(|&(k, _)| k);
+        for &(k, _) in &half[start..] {
+            let j = sender(k);
+            degree[i] += 1;
+            degree[j] += 1;
         }
-        nl.end_row();
+        half_offsets.push(half.len());
+    }
+    for d in &degree {
+        nl.row_offsets
+            .push(nl.row_offsets[nl.row_offsets.len() - 1] + d);
+    }
+    let mut next = nl.row_offsets[..n].to_vec();
+    nl.size_edges();
+    // Row i receives its edges from atoms j < i while those atoms are
+    // processed, in increasing order of j; then its self-images, −S before S;
+    // then its edges to atoms j > i.
+    for i in 0..n {
+        let row = &half[half_offsets[i]..half_offsets[i + 1]];
+        let (own, others) = row.split_at(row.partition_point(|&(k, _)| sender(k) == i));
+        for (_, e) in own.iter().rev() {
+            nl.set(next[i], i, &e.reversed());
+            next[i] += 1;
+        }
+        for (k, e) in own.iter().chain(others) {
+            nl.set(next[i], sender(*k), e);
+            next[i] += 1;
+        }
+        // Row j needs the edges from i in increasing −S, the reverse of
+        // their order here.
+        for run in others.chunk_by(|a, b| sender(a.0) == sender(b.0)) {
+            let j = sender(run[0].0);
+            for (_, e) in run.iter().rev() {
+                nl.set(next[j], i, &e.reversed());
+                next[j] += 1;
+            }
+        }
     }
     Ok(())
 }
@@ -204,9 +316,7 @@ mod tests {
             cell,
             pbc,
         };
-        Bins::new(&Prepared::new(&s, cutoff).unwrap())
-            .axes
-            .map(|a| a.n)
+        axes(&Prepared::new(&s, cutoff).unwrap()).map(|a| a.n)
     }
 
     #[test]
@@ -254,12 +364,22 @@ mod tests {
             cell: Some(&Cell::cubic(30.0)),
             pbc: [true; 3],
         };
-        let bins = Bins::new(&Prepared::new(&s, 3.0).unwrap());
-        assert_eq!(bins.axes.each_ref().map(|a| a.n), [9; 3]);
-        assert_eq!(bins.keys, [[0; 3], [6; 3]]);
-        assert_eq!(bins.atoms_in([0; 3]), [0, 1]);
-        assert_eq!(bins.atoms_in([6; 3]), [2]);
-        assert_eq!(bins.atoms_in([1; 3]), []);
+        let p = Prepared::new(&s, 3.0).unwrap();
+        assert_eq!(axes(&p).map(|a| a.n), [9; 3]);
+        // Bins [0; 3] and [6; 3] are occupied; each searches only itself, as
+        // the other is 6 bins away.
+        let bins = Bins::new(&p, f64::INFINITY).unwrap();
+        assert_eq!(bins.atoms, [0, 1, 2]);
+        assert_eq!(bins.bin_of, [0, 0, 1]);
+        assert_eq!(bins.target_offsets, [0, 1, 2]);
+        let searched = |i| -> Vec<&[usize]> {
+            bins.targets_of(i)
+                .iter()
+                .map(|t| &bins.atoms[t.atoms.clone()])
+                .collect()
+        };
+        assert_eq!(searched(0), [[0, 1]]);
+        assert_eq!(searched(2), [[2]]);
         assert_eq!(bin_counts(&[], None, [false; 3], 3.0), [1, 1, 1]);
     }
 }

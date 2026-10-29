@@ -1,5 +1,6 @@
 //! Neighbor-list build time on diamond Si supercells, in ns per atom: the
-//! median of 10 builds after 3 warm-up builds.
+//! median of 10 builds after 3 warm-up builds, with `build` and with
+//! `build_into` rebuilding the same list.
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -47,28 +48,40 @@ fn diamond(n: usize) -> Vec<[f64; 3]> {
     positions
 }
 
-/// Median build time in seconds, and the number of edges.
-fn time(s: &Structure<'_, f64>, cutoff: f64, algo: Algorithm) -> (f64, usize) {
-    let build = || NeighborList::build(black_box(s), cutoff, algo).unwrap();
-    let n_edges = build().n_edges();
-    for _ in 1..WARMUP {
-        black_box(build());
+/// Median time of `f` in seconds.
+fn median(mut f: impl FnMut()) -> f64 {
+    for _ in 0..WARMUP {
+        f();
     }
     let mut times: Vec<f64> = (0..RUNS)
         .map(|_| {
             let start = Instant::now();
-            black_box(build());
+            f();
             start.elapsed().as_secs_f64()
         })
         .collect();
     times.sort_by(f64::total_cmp);
-    ((times[RUNS / 2 - 1] + times[RUNS / 2]) / 2.0, n_edges)
+    (times[RUNS / 2 - 1] + times[RUNS / 2]) / 2.0
+}
+
+/// Median time in seconds of `build` and of `build_into` rebuilding the same
+/// list, and the number of edges.
+fn time(s: &Structure<'_, f64>, cutoff: f64, algo: Algorithm) -> (f64, f64, usize) {
+    let mut nl = NeighborList::build(s, cutoff, algo).unwrap();
+    let build = median(|| {
+        black_box(NeighborList::build(black_box(s), cutoff, algo).unwrap());
+    });
+    let build_into = median(|| {
+        nl.build_into(black_box(s), cutoff, algo).unwrap();
+        black_box(&nl);
+    });
+    (build, build_into, nl.n_edges())
 }
 
 fn main() {
     println!(
-        "{:>7} {:>7} {:>9} {:>10} {:>12}",
-        "atoms", "cutoff", "algorithm", "edges", "ns/atom"
+        "{:>7} {:>7} {:>9} {:>10} {:>12} {:>12}",
+        "atoms", "cutoff", "algorithm", "edges", "build", "build_into"
     );
     for cutoff in CUTOFFS {
         for n in REPEATS {
@@ -86,14 +99,16 @@ fn main() {
                 if algo == Algorithm::Naive && positions.len() > NAIVE_MAX_ATOMS {
                     continue;
                 }
-                let (seconds, n_edges) = time(&s, cutoff, algo);
+                let (build, build_into, n_edges) = time(&s, cutoff, algo);
+                let ns_per_atom = 1e9 / positions.len() as f64;
                 println!(
-                    "{:>7} {:>7.1} {:>9} {:>10} {:>12.1}",
+                    "{:>7} {:>7.1} {:>9} {:>10} {:>12.1} {:>12.1}",
                     positions.len(),
                     cutoff,
                     name,
                     n_edges,
-                    seconds * 1e9 / positions.len() as f64
+                    build * ns_per_atom,
+                    build_into * ns_per_atom
                 );
             }
         }
