@@ -37,3 +37,19 @@ Edges are sorted by `(i, j, S)`.
 | `wire` | `pbc = (0, 0, 1)`, atoms outside the cell |
 | `isolated` | `pbc = (0, 0, 0)` |
 | `exact_cutoff` | pairs at exactly the cutoff, which are excluded |
+
+## `sph/`
+
+Spherical harmonics from `e3nn_jax.spherical_harmonics("0e + 1o + 2e + 3o",
+r, normalize=True, normalization="component")` with `jax_enable_x64`, read by
+`crates/asanoha-sph/tests/e3nn.rs`.
+
+| Tensor | dtype | Shape | |
+|---|---|---|---|
+| `in.vectors` | F64 | `[E, 3]` | the six axes, the eight diagonals, 128 random vectors with lengths in `[0.5, 6)` |
+| `out.sh` | F64 | `[E, 16]` | `Y` |
+| `out.grad` | F64 | `[E, 16, 3]` | `∂Y/∂r` from `jax.jacfwd` |
+
+| File | Case |
+|---|---|
+| `lmax3` | `l ≤ 3` |
