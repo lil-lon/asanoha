@@ -481,6 +481,22 @@ fn skewed_cell_far_atom() {
 }
 
 #[test]
+fn cell_list_matches_naive_at_cutoff_far_from_cell() {
+    // The cell of `check_skewed_cell_far_atom` with the cutoff around the
+    // separation of the images at k = ±37, 37·4e-6. The cell list checks
+    // these pairs from positions wrapped 2¹⁶ cells back, which are less
+    // accurate than the input positions.
+    let c = cell([[1.0, 1.0, 0.0], [1.0, 1.0 + 4e-6, 0.0], [0.0, 0.0, 1.0]]);
+    let pos = [[65536.0, 65536.0, 0.0], [0.0; 3]];
+    for f in [1.0 - 1e-6, 1.0 - 1e-9, 1.0, 1.0 + 1e-9, 1.0 + 1e-6] {
+        let cutoff = 37.0 * 4e-6 * f;
+        let naive = build(&pos, Some(&c), ALL, cutoff, Algorithm::Naive).unwrap();
+        let cell_list = build(&pos, Some(&c), ALL, cutoff, Algorithm::CellList).unwrap();
+        assert_eq!(cell_list, naive, "{f}");
+    }
+}
+
+#[test]
 fn rejects_cutoff_below_cell_resolution() {
     // A shift of about ±65535 in this cell sums terms of about 4e12, whose
     // rounding (about 4e-4) would exceed a cutoff of 1e-8.
@@ -562,6 +578,47 @@ fn cell_list_matches_naive() {
             let cell_list = build(&pos, cell, pbc, cutoff, Algorithm::CellList).unwrap();
             assert_eq!(cell_list, naive);
         }
+    }
+}
+
+#[test]
+fn build_into_matches_build() {
+    // Building into a list that held another structure gives the list of
+    // `build`, building the same input again keeps every vector in place, and
+    // a failed build leaves no atoms.
+    let ptrs = |nl: &NeighborList<f64>| {
+        (
+            nl.row_offsets.as_ptr(),
+            nl.senders.as_ptr(),
+            nl.shifts.as_ptr(),
+            nl.vectors.as_ptr(),
+            nl.distances.as_ptr(),
+        )
+    };
+    let mut rng = XorShift64::new(29);
+    for algo in ALGORITHMS {
+        let (pos, c, pbc, cutoff) = random_structure(&mut rng);
+        let mut nl = build(&pos, Some(&c), pbc, cutoff, algo).unwrap();
+        for _ in 0..50 {
+            let (pos, c, pbc, cutoff) = random_structure(&mut rng);
+            let s = Structure {
+                positions: &pos,
+                cell: Some(&c),
+                pbc,
+            };
+            nl.build_into(&s, cutoff, algo).unwrap();
+            assert_eq!(nl, NeighborList::build(&s, cutoff, algo).unwrap());
+            let before = ptrs(&nl);
+            nl.build_into(&s, cutoff, algo).unwrap();
+            assert_eq!(ptrs(&nl), before);
+        }
+        let s = Structure {
+            positions: &[[f64::NAN; 3]],
+            cell: None,
+            pbc: NONE,
+        };
+        assert_eq!(nl.build_into(&s, 1.0, algo), Err(Error::InvalidPosition(0)));
+        assert_eq!((nl.n_atoms(), nl.n_edges()), (0, 0));
     }
 }
 
