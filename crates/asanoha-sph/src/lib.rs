@@ -5,6 +5,11 @@
 //! The 16 outputs are `l = 0, 1, 2, 3` in turn, `2l + 1` components each, in
 //! e3nn-jax's order. They depend only on the direction `u = r / |r|`, and
 //! `Σ_m Y_lm(u)² = 2l + 1`.
+//!
+//! The polynomials are transcribed from the symbolic form that
+//! e3nn/e3nn-jax (Apache-2.0) builds in
+//! `e3nn_jax/_src/spherical_harmonics/recursive.py`. Its license is
+//! reproduced in `THIRD_PARTY_LICENSES/e3nn-jax-LICENSE` for attribution.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
