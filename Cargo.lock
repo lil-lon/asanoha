@@ -26,3 +26,10 @@ version = "0.0.0"
 dependencies = [
  "asanoha-core",
 ]
+
+[[package]]
+name = "asanoha-tp"
+version = "0.0.0"
+dependencies = [
+ "asanoha-core",
+]
