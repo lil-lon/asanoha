@@ -1,0 +1,12 @@
+[package]
+name = "asanoha-sph"
+description = "Real spherical harmonics up to l = 3 with gradients for the asanoha crates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+asanoha-core = { path = "../asanoha-core" }
+
+[dev-dependencies]
+asanoha-core = { path = "../asanoha-core", features = ["testing"] }

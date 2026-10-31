@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from asanoha_export import bench, nblist
+from asanoha_export import bench, nblist, sph
 
 
 def main():
@@ -15,5 +15,6 @@ def main():
     args = parser.parse_args()
     if args.command == "fixtures":
         nblist.write(args.out / "nblist")
+        sph.write(args.out / "sph")
     else:
         bench.run()
