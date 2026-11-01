@@ -53,3 +53,30 @@ r, normalize=True, normalization="component")` with `jax_enable_x64`, read by
 | File | Case |
 |---|---|
 | `lmax3` | `l ≤ 3` |
+
+## `tp/`
+
+Messages `scatter_sum(e3nn.tensor_product(x[senders], Y, filter_ir_out=…) * w,
+receivers) / √n̄` as nequix's `NequixConvolution` computes them, with
+`jax_enable_x64`, read by `crates/asanoha-tp/tests/e3nn.rs`. The graph has 5
+nodes and 12 edges; node 3 receives none.
+
+| Tensor | dtype | Shape | |
+|---|---|---|---|
+| `in.x` | F64 | `[N, dim_in]` | node features in e3nn's layout |
+| `in.sh` | F64 | `[E, 16]` | spherical harmonics `l ≤ 3` of random vectors |
+| `in.w` | F64 | `[E, num_irreps_tp]` | per-edge weights |
+| `in.receivers`, `in.senders` | I64 | `[E]` | edges, sorted by receiver |
+| `in.avg_n_neighbors` | F64 | `[]` | `n̄` |
+| `tp.paths` | I64 | `[P, 3]` | `(in_block, l_sh, out_block)` in nequix's enumeration order; `out_block` indexes `irreps_tp` |
+| `tp.cg.{l1}_{l2}_{l3}` | F64 | `[nnz, 4]` | `(m1, m2, m3, c)` of `clebsch_gordan(l1, l2, l3) · √(2l3 + 1)` with `|c| > 1e-12` |
+| `out.messages` | F64 | `[N, dim_tp]` | messages in e3nn's layout |
+
+`__metadata__` holds `irreps_in` and `irreps_tp`, the sorted (not simplified)
+irreps of the paths' outputs.
+
+| File | Input irreps | Output irreps |
+|---|---|---|
+| `scalar_in` | `6x0e` | `0e`, `1o`, `2e`, `3o` |
+| `hidden` | `5x0e+4x1o+3x2e+2x3o` | `0e`, `1o`, `2e`, `3o` |
+| `scalar_out` | `5x0e+4x1o+3x2e+2x3o` | `0e` |
