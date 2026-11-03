@@ -19,6 +19,10 @@ struct Fixture {
     w: Vec<f64>,
     /// `[N][dim_out]` in e3nn's layout.
     messages: Vec<f64>,
+    /// `∂L/∂messages`, in e3nn's layout.
+    d_messages: Vec<f64>,
+    /// `∂L/∂x` in e3nn's layout, `∂L/∂Y` and `∂L/∂w`.
+    grads: [Vec<f64>; 3],
 }
 
 fn fixture(case: &str) -> Fixture {
@@ -80,12 +84,14 @@ fn fixture(case: &str) -> Fixture {
         sh: reals("in.sh"),
         w: reals("in.w"),
         messages: reals("out.messages"),
+        d_messages: reals("in.d_messages"),
+        grads: ["out.d_x", "out.d_sh", "out.d_w"].map(reals),
     }
 }
 
 /// The messages of the fused and the naive forward in e3nn's layout, and the
-/// largest expected magnitude.
-fn eval<T: Real>(f: &Fixture) -> (Vec<T>, Vec<T>, f64) {
+/// gradients `∂L/∂x` in e3nn's layout, `∂L/∂Y` and `∂L/∂w`.
+fn eval<T: Real>(f: &Fixture) -> ([Vec<T>; 2], [Vec<T>; 3]) {
     let tp = TensorProduct::<T>::new(f.desc.clone(), f.avg_n_neighbors).unwrap();
     let reals = |v: &[f64]| v.iter().map(|&a| T::from_f64(a)).collect::<Vec<T>>();
     let n = f.row_offsets.len() - 1;
@@ -102,29 +108,53 @@ fn eval<T: Real>(f: &Fixture) -> (Vec<T>, Vec<T>, f64) {
     let fused = out.to_layout(Layout::MulIr).data;
     naive::forward(&tp, &f.row_offsets, &f.senders, &x, &sh, &w, &mut out);
     let oracle = out.to_layout(Layout::MulIr).data;
-    let max = f.messages.iter().fold(0.0, |m: f64, v| m.max(v.abs()));
-    (fused, oracle, max)
+
+    let d_out = Features {
+        irreps: f.desc.irreps_out.clone(),
+        layout: Layout::MulIr,
+        n,
+        data: reals(&f.d_messages),
+    }
+    .to_layout(Layout::IrMul);
+    let mut d_x = Features::zeros(f.desc.irreps_in.clone(), Layout::IrMul, n);
+    let (mut d_sh, mut d_w) = (vec![T::ZERO; sh.len()], vec![T::ZERO; w.len()]);
+    tp.backward(
+        &f.row_offsets,
+        &f.senders,
+        &x,
+        &sh,
+        &w,
+        &d_out,
+        &mut d_x,
+        &mut d_sh,
+        &mut d_w,
+    );
+    let d_x = d_x.to_layout(Layout::MulIr).data;
+    ([fused, oracle], [d_x, d_sh, d_w])
 }
 
-// The tolerances are about twice the largest errors measured, relative to the
-// largest message.
+/// Checks the messages and the gradients of every case against e3nn-jax's,
+/// to `tol` relative to the largest expected magnitude of each.
+fn matches_e3nn<T: Real>(tol: f64) {
+    for case in CASES {
+        let f = fixture(case);
+        let (messages, grads) = eval::<T>(&f);
+        let expected = std::iter::repeat_n(&f.messages, 2).chain(&f.grads);
+        for (actual, expected) in messages.into_iter().chain(grads).zip(expected) {
+            let max = expected.iter().fold(0.0, |m: f64, v| m.max(v.abs()));
+            assert_close!(actual, *expected, tol * max, 0.0);
+        }
+    }
+}
+
+// The tolerances are about twice the largest errors measured.
 
 #[test]
 fn matches_e3nn_f64() {
-    for case in CASES {
-        let f = fixture(case);
-        let (fused, oracle, max) = eval::<f64>(&f);
-        assert_close!(oracle, f.messages, 1e-15 * max, 0.0);
-        assert_close!(fused, f.messages, 1e-15 * max, 0.0);
-    }
+    matches_e3nn::<f64>(1e-15);
 }
 
 #[test]
 fn matches_e3nn_f32() {
-    for case in CASES {
-        let f = fixture(case);
-        let (fused, oracle, max) = eval::<f32>(&f);
-        assert_close!(oracle, f.messages, 4e-7 * max, 0.0);
-        assert_close!(fused, f.messages, 4e-7 * max, 0.0);
-    }
+    matches_e3nn::<f32>(7e-7);
 }

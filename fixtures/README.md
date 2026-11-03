@@ -71,6 +71,10 @@ nodes and 12 edges; node 3 receives none.
 | `tp.paths` | I64 | `[P, 3]` | `(in_block, l_sh, out_block)` in nequix's enumeration order; `out_block` indexes `irreps_tp` |
 | `tp.cg.{l1}_{l2}_{l3}` | F64 | `[nnz, 4]` | `(m1, m2, m3, c)` of `clebsch_gordan(l1, l2, l3) · √(2l3 + 1)` with `|c| > 1e-12` |
 | `out.messages` | F64 | `[N, dim_tp]` | messages in e3nn's layout |
+| `in.d_messages` | F64 | `[N, dim_tp]` | random cotangent `∂L/∂messages` |
+| `out.d_x` | F64 | `[N, dim_in]` | `∂L/∂x` from `jax.vjp` |
+| `out.d_sh` | F64 | `[E, 16]` | `∂L/∂Y` from `jax.vjp` |
+| `out.d_w` | F64 | `[E, num_irreps_tp]` | `∂L/∂w` from `jax.vjp` |
 
 `__metadata__` holds `irreps_in` and `irreps_tp`, the sorted (not simplified)
 irreps of the paths' outputs.
