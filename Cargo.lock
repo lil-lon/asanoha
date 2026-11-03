@@ -14,6 +14,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "asanoha-ops"
+version = "0.0.0"
+dependencies = [
+ "asanoha-core",
+]
+
+[[package]]
 name = "asanoha-radial"
 version = "0.0.0"
 dependencies = [

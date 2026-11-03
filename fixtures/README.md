@@ -80,3 +80,51 @@ irreps of the paths' outputs.
 | `scalar_in` | `6x0e` | `0e`, `1o`, `2e`, `3o` |
 | `hidden` | `5x0e+4x1o+3x2e+2x3o` | `0e`, `1o`, `2e`, `3o` |
 | `scalar_out` | `5x0e+4x1o+3x2e+2x3o` | `0e` |
+
+## `ops/`
+
+The node-wise operations of nequix's `NequixConvolution` with
+`jax_enable_x64`, read by `crates/asanoha-ops/tests/e3nn.rs`. Each file has 5
+nodes, a random cotangent `in.d_y` and the input gradient `out.d_x` from
+`jax.vjp`.
+
+| Tensor | dtype | Shape | |
+|---|---|---|---|
+| `in.x` | F64 | `[N, dim_in]` | input in e3nn's layout |
+| `out.y` | F64 | `[N, dim_out]` | output in e3nn's layout |
+| `in.d_y` | F64 | `[N, dim_out]` | `∂L/∂y` |
+| `out.d_x` | F64 | `[N, dim_in]` | `∂L/∂x` |
+
+`linear_*`: `e3nn.FunctionalLinear` on the regrouped input irreps with random
+weights, as `e3nn.equinox.Linear(..., force_irreps_out=True)` computes it.
+
+| Tensor | dtype | Shape | |
+|---|---|---|---|
+| `linear.{i}_{o}` | F64 | `[mul_in, mul_out]` | weights from block `i` of `irreps_in` to block `o` of `irreps_out`, with `√α` folded in |
+
+`gate_*`: `e3nn.gate(x, even_act=silu, odd_act=tanh, even_gate_act=silu)`.
+
+| Tensor | dtype | Shape | |
+|---|---|---|---|
+| `gate.c_silu` | F64 | `[]` | `√mean(silu(x)²)` over `normalspace(1_000_001)`, the constant `normalize_function(silu)` divides by |
+
+`norm_*`: nequix's `RMSLayerNorm(irreps, centering=False,
+std_balance_degrees=True)`, transcribed from `layer_norm.py`, with random
+affine weights.
+
+| Tensor | dtype | Shape | |
+|---|---|---|---|
+| `norm.gamma.{b}` | F64 | `[mul_b]` | affine weights of block `b` |
+| `norm.eps` | F64 | `[]` | `ε` |
+
+`__metadata__` holds `irreps_in` and `irreps_out` (`irreps` for `norm_*`).
+
+| File | Input irreps | Output irreps |
+|---|---|---|
+| `linear_hidden` | `5x0e+4x1o+3x2e+2x3o` | the same |
+| `linear_tp` | `irreps_tp` of `tp/hidden` | `14x0e+4x1o+3x2e+2x3o` |
+| `linear_scalar_in` | `6x0e` | `14x0e+4x1o+3x2e+2x3o`; non-scalars have no path |
+| `gate_hidden` | `14x0e+4x1o+3x2e+2x3o` | `5x0e+4x1o+3x2e+2x3o` |
+| `gate_scalar_out` | `5x0e` | `5x0e` |
+| `norm_hidden` | `14x0e+4x1o+3x2e+2x3o` | the same |
+| `norm_scalar_out` | `5x0e` | the same |

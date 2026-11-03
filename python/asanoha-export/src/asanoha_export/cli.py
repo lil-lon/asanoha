@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from asanoha_export import bench, nblist, sph, tp
+from asanoha_export import bench, nblist, ops, sph, tp
 
 
 def main():
@@ -17,5 +17,6 @@ def main():
         nblist.write(args.out / "nblist")
         sph.write(args.out / "sph")
         tp.write(args.out / "tp")
+        ops.write(args.out / "ops")
     else:
         bench.run()
