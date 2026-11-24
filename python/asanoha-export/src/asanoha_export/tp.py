@@ -51,6 +51,15 @@ def clebsch_gordan(l1, l2, l3):
     return np.stack([m1, m2, m3, cg[m1, m2, m3]], axis=1)
 
 
+def path_tensors(irreps_in, irreps_tp, table):
+    """`tp.paths` and the `tp.cg.{l1}_{l2}_{l3}` coefficients of the paths in `table`."""
+    tensors = {"tp.paths": np.array(table, dtype=np.int64)}
+    for i, l2, k in table:
+        l1, l3 = irreps_in[i].ir.l, irreps_tp[k].ir.l
+        tensors[f"tp.cg.{l1}_{l2}_{l3}"] = clebsch_gordan(l1, l2, l3)
+    return tensors
+
+
 def graph(rng):
     """Receiver-sorted edges of 5 nodes; node 3 receives none."""
     receivers = np.sort(rng.choice([0, 1, 2, 4], size=12))
@@ -92,16 +101,12 @@ def write(out_dir: Path):
             "in.receivers": receivers.astype(np.int64),
             "in.senders": senders.astype(np.int64),
             "in.avg_n_neighbors": np.array(AVG_N_NEIGHBORS),
-            "tp.paths": np.array(table, dtype=np.int64),
             "out.messages": np.asarray(out),
             "in.d_messages": d_messages,
             "out.d_x": np.asarray(d_x),
             "out.d_sh": np.asarray(d_sh),
             "out.d_w": np.asarray(d_w),
-        }
-        for i, l2, k in table:
-            l1, l3 = irreps_in[i].ir.l, irreps_tp[k].ir.l
-            tensors[f"tp.cg.{l1}_{l2}_{l3}"] = clebsch_gordan(l1, l2, l3)
+        } | path_tensors(irreps_in, irreps_tp, table)
         metadata = {
             "irreps_in": str(irreps_in),
             "irreps_tp": str(irreps_tp),

@@ -78,6 +78,11 @@ impl<T: Real> Linear<T> {
         })
     }
 
+    /// Irreps of the output.
+    pub fn irreps_out(&self) -> &Irreps {
+        &self.irreps_out
+    }
+
     fn check(&self, x: &Features<T>, out: &Features<T>) {
         assert_eq!((&x.irreps, x.layout), (&self.irreps_in, Layout::IrMul));
         assert_eq!((&out.irreps, out.layout), (&self.irreps_out, Layout::IrMul));

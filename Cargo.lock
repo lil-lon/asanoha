@@ -14,6 +14,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "asanoha-nequix"
+version = "0.0.0"
+dependencies = [
+ "asanoha-core",
+ "asanoha-ops",
+ "asanoha-radial",
+ "asanoha-tp",
+]
+
+[[package]]
 name = "asanoha-ops"
 version = "0.0.0"
 dependencies = [
