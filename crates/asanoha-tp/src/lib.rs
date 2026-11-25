@@ -2,7 +2,8 @@
 //! harmonics of each edge, scaled by per-edge weights and summed over the
 //! edges of each receiver, as nequix's `NequixConvolution` computes
 //! `scatter_sum(tensor_product(x[senders], Y) * w, receivers) / √n̄` with
-//! e3nn-jax.
+//! e3nn-jax, and its gradients with respect to the features, the spherical
+//! harmonics and the weights.
 //!
 //! The paths and their Clebsch–Gordan coefficients are data from the
 //! exporter; this crate knows no group theory.
@@ -203,6 +204,62 @@ impl<T: Real> TensorProduct<T> {
             }
         }
     }
+
+    /// Adds `∂L/∂x`, `∂L/∂Y` and `∂L/∂w` to `d_x`, `d_sh` and `d_w` from
+    /// `∂L/∂out` in `d_out`, for the arguments of [`TensorProduct::forward`].
+    /// The gradients have the shapes and layouts of `x`, `sh` and `w`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn backward(
+        &self,
+        row_offsets: &[usize],
+        senders: &[u32],
+        x: &Features<T>,
+        sh: &[T],
+        w: &[T],
+        d_out: &Features<T>,
+        d_x: &mut Features<T>,
+        d_sh: &mut [T],
+        d_w: &mut [T],
+    ) {
+        self.check(row_offsets, senders, x, sh, w, d_out);
+        assert_eq!((&d_x.irreps, d_x.layout, d_x.n), (&x.irreps, x.layout, x.n));
+        assert_eq!((d_sh.len(), d_w.len()), (sh.len(), w.len()));
+        let (dim_in, dim_out) = (self.irreps_in.dim(), self.irreps_out.dim());
+        let scale = T::ONE / self.avg_n_neighbors.sqrt();
+        let mut g = vec![T::ZERO; dim_out];
+        for (i, d_row) in d_out.data.chunks_exact(dim_out).enumerate() {
+            for (g, &d) in g.iter_mut().zip(d_row) {
+                *g = d * scale;
+            }
+            for e in row_offsets[i]..row_offsets[i + 1] {
+                let j = senders[e] as usize;
+                let xj = &x.data[j * dim_in..][..dim_in];
+                let d_xj = &mut d_x.data[j * dim_in..][..dim_in];
+                let y = &sh[e * self.sh_dim..][..self.sh_dim];
+                let d_y = &mut d_sh[e * self.sh_dim..][..self.sh_dim];
+                let we = &w[e * self.n_weights..][..self.n_weights];
+                let d_we = &mut d_w[e * self.n_weights..][..self.n_weights];
+                for k in &self.kernels {
+                    let wk = &we[k.w_start..][..k.mul];
+                    let d_wk = &mut d_we[k.w_start..][..k.mul];
+                    for &(x_off, y_off, o_off, c) in &k.cg {
+                        let s = c * y[y_off];
+                        let xin = &xj[x_off..][..k.mul];
+                        let d_xin = &mut d_xj[x_off..][..k.mul];
+                        let go = &g[o_off..][..k.mul];
+                        let mut t = T::ZERO;
+                        for u in 0..k.mul {
+                            let xg = xin[u] * go[u];
+                            d_xin[u] += s * wk[u] * go[u];
+                            d_wk[u] += s * xg;
+                            t += wk[u] * xg;
+                        }
+                        d_y[y_off] += c * t;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -330,29 +387,53 @@ mod tests {
         TensorProduct::new(desc, 7.5).unwrap()
     }
 
-    #[test]
-    fn fused_matches_naive() {
-        let mut rng = XorShift64::new(1);
-        let tp = random_tp(&mut rng);
-        let n = 9;
-        // Random degrees in 0..6, so some nodes receive nothing.
+    /// Arguments of [`TensorProduct::forward`] for `n` nodes.
+    struct Inputs {
+        row_offsets: Vec<usize>,
+        senders: Vec<u32>,
+        x: Features<f64>,
+        sh: Vec<f64>,
+        w: Vec<f64>,
+    }
+
+    /// A random graph with degrees in `0..6`, so some nodes receive nothing,
+    /// and random features, spherical harmonics and weights.
+    fn random_inputs(rng: &mut XorShift64, tp: &TensorProduct<f64>, n: usize) -> Inputs {
         let mut row_offsets = vec![0];
         for _ in 0..n {
             row_offsets.push(row_offsets.last().unwrap() + (rng.next_u64() % 6) as usize);
         }
         let n_edges = row_offsets[n];
-        let senders: Vec<u32> = (0..n_edges)
+        let senders = (0..n_edges)
             .map(|_| (rng.next_u64() % n as u64) as u32)
             .collect();
         let mut normal = |len| (0..len).map(|_| rng.normal()).collect::<Vec<_>>();
-        let x = Features {
-            irreps: tp.irreps_in.clone(),
-            layout: Layout::IrMul,
-            n,
-            data: normal(n * tp.irreps_in.dim()),
-        };
-        let sh = normal(n_edges * 16);
-        let w = normal(n_edges * tp.n_weights);
+        Inputs {
+            row_offsets,
+            senders,
+            x: Features {
+                irreps: tp.irreps_in.clone(),
+                layout: Layout::IrMul,
+                n,
+                data: normal(n * tp.irreps_in.dim()),
+            },
+            sh: normal(n_edges * tp.sh_dim),
+            w: normal(n_edges * tp.n_weights),
+        }
+    }
+
+    #[test]
+    fn fused_matches_naive() {
+        let mut rng = XorShift64::new(1);
+        let tp = random_tp(&mut rng);
+        let n = 9;
+        let Inputs {
+            row_offsets,
+            senders,
+            x,
+            sh,
+            w,
+        } = random_inputs(&mut rng, &tp, n);
 
         let mut fused = Features::zeros(tp.irreps_out.clone(), Layout::IrMul, n);
         tp.forward(&row_offsets, &senders, &x, &sh, &w, &mut fused);
@@ -361,6 +442,72 @@ mod tests {
         assert!(fused.data.iter().any(|&v| v != 0.0));
         // About twice the largest difference measured; the outputs reach 13.
         assert_close!(fused.data, oracle.data, 4e-15, 0.0);
+    }
+
+    /// The output is linear in each of `x`, `Y` and `w`, so
+    /// `⟨∂L/∂out, out⟩ = ⟨∂L/∂x, x⟩ = ⟨∂L/∂Y, Y⟩ = ⟨∂L/∂w, w⟩`.
+    #[test]
+    fn backward_is_the_adjoint() {
+        let mut rng = XorShift64::new(2);
+        let tp = random_tp(&mut rng);
+        let n = 9;
+        let Inputs {
+            row_offsets,
+            senders,
+            x,
+            sh,
+            w,
+        } = random_inputs(&mut rng, &tp, n);
+        let mut out = Features::zeros(tp.irreps_out.clone(), Layout::IrMul, n);
+        tp.forward(&row_offsets, &senders, &x, &sh, &w, &mut out);
+        let mut normal = |len| (0..len).map(|_| rng.normal()).collect::<Vec<_>>();
+        let d_out = Features {
+            data: normal(out.data.len()),
+            ..out.clone()
+        };
+
+        // The gradients are added to what the buffers hold.
+        let start = [normal(x.data.len()), normal(sh.len()), normal(w.len())];
+        let mut d_x = Features {
+            data: start[0].clone(),
+            ..x.clone()
+        };
+        let (mut d_sh, mut d_w) = (start[1].clone(), start[2].clone());
+        tp.backward(
+            &row_offsets,
+            &senders,
+            &x,
+            &sh,
+            &w,
+            &d_out,
+            &mut d_x,
+            &mut d_sh,
+            &mut d_w,
+        );
+
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
+        // `⟨d − start, v⟩`: the added gradient against the argument, with
+        // `start` subtracted per element rather than as `⟨start, v⟩`, which
+        // cancels.
+        let added = |d: &[f64], start: &[f64], v: &[f64]| {
+            d.iter()
+                .zip(start)
+                .zip(v)
+                .map(|((p, s), q)| (p - s) * q)
+                .sum::<f64>()
+        };
+        let expected = dot(&d_out.data, &out.data);
+        assert_ne!(expected, 0.0);
+        for actual in [
+            added(&d_x.data, &start[0], &x.data),
+            added(&d_sh, &start[1], &sh),
+            added(&d_w, &start[2], &w),
+        ] {
+            // About three times the largest difference measured, as the
+            // inputs come from the platform's `ln` and `cos`; the inner
+            // product is −0.85.
+            assert_close!(actual, expected, 1e-14, 0.0);
+        }
     }
 
     #[test]

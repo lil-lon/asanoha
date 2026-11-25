@@ -80,6 +80,11 @@ def write(out_dir: Path):
         )
         x = rng.normal(size=(5, irreps_in.dim))
         w = rng.normal(size=(len(receivers), irreps_tp.num_irreps))
+        out, vjp = jax.vjp(
+            lambda x, sh, w: messages(irreps_in, irreps_tp, x, sh, w, receivers, senders), x, sh, w
+        )
+        d_messages = rng.normal(size=out.shape)
+        d_x, d_sh, d_w = vjp(d_messages)
         tensors = {
             "in.x": x,
             "in.sh": sh,
@@ -88,7 +93,11 @@ def write(out_dir: Path):
             "in.senders": senders.astype(np.int64),
             "in.avg_n_neighbors": np.array(AVG_N_NEIGHBORS),
             "tp.paths": np.array(table, dtype=np.int64),
-            "out.messages": np.asarray(messages(irreps_in, irreps_tp, x, sh, w, receivers, senders)),
+            "out.messages": np.asarray(out),
+            "in.d_messages": d_messages,
+            "out.d_x": np.asarray(d_x),
+            "out.d_sh": np.asarray(d_sh),
+            "out.d_w": np.asarray(d_w),
         }
         for i, l2, k in table:
             l1, l3 = irreps_in[i].ir.l, irreps_tp[k].ir.l
