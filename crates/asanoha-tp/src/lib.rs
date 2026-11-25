@@ -486,8 +486,16 @@ mod tests {
         );
 
         let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(p, q)| p * q).sum::<f64>();
-        // `⟨d − start, v⟩`: the added gradient against the argument.
-        let added = |d: &[f64], start: &[f64], v: &[f64]| dot(d, v) - dot(start, v);
+        // `⟨d − start, v⟩`: the added gradient against the argument, with
+        // `start` subtracted per element rather than as `⟨start, v⟩`, which
+        // cancels.
+        let added = |d: &[f64], start: &[f64], v: &[f64]| {
+            d.iter()
+                .zip(start)
+                .zip(v)
+                .map(|((p, s), q)| (p - s) * q)
+                .sum::<f64>()
+        };
         let expected = dot(&d_out.data, &out.data);
         assert_ne!(expected, 0.0);
         for actual in [
@@ -495,9 +503,10 @@ mod tests {
             added(&d_sh, &start[1], &sh),
             added(&d_w, &start[2], &w),
         ] {
-            // About twice the largest difference measured; the inner product
-            // is −0.85.
-            assert_close!(actual, expected, 4e-14, 0.0);
+            // About three times the largest difference measured, as the
+            // inputs come from the platform's `ln` and `cos`; the inner
+            // product is −0.85.
+            assert_close!(actual, expected, 1e-14, 0.0);
         }
     }
 
