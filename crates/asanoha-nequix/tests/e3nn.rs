@@ -1,11 +1,13 @@
-//! Layers against nequix's `NequixConvolution` computed with e3nn-jax, from
-//! the fixtures written by `asanoha-export fixtures`.
+//! Layers against nequix's `NequixConvolution` and models against its
+//! `Nequix`, computed with e3nn-jax, from the fixtures written by
+//! `asanoha-export fixtures`.
 
 use asanoha_core::safetensors::SafeTensors;
 use asanoha_core::{Features, Irreps, Layout, Real, assert_close};
-use asanoha_nequix::Layer;
+use asanoha_nblist::{Algorithm, Cell, NeighborList, Structure};
+use asanoha_nequix::{Layer, Model};
 use asanoha_ops::{Gate, Linear, LinearPath, RmsNorm};
-use asanoha_radial::Mlp;
+use asanoha_radial::{Mlp, RadialBasis};
 use asanoha_tp::{CgEntry, Path, TensorProduct, TpDescriptor};
 
 const CASES: [&str; 3] = ["scalar_in", "hidden", "scalar_out"];
@@ -59,12 +61,14 @@ fn linear<T: Real>(
     Linear::new(irreps_in.clone(), irreps_out.clone(), paths).unwrap()
 }
 
+/// The tensor product of `{prefix}tp.paths` and `{prefix}tp.cg.*`.
 fn tensor_product<T: Real>(
     st: &SafeTensors,
+    prefix: &str,
     irreps_in: &Irreps,
     irreps_tp: &Irreps,
 ) -> TensorProduct<T> {
-    let paths = ints(st, "tp.paths")
+    let paths = ints(st, &format!("{prefix}tp.paths"))
         .as_chunks::<3>()
         .0
         .iter()
@@ -72,7 +76,7 @@ fn tensor_product<T: Real>(
             let (i, k) = (i as usize, k as usize);
             let l1 = irreps_in.blocks()[i].ir.l;
             let l3 = irreps_tp.blocks()[k].ir.l;
-            let cg = reals(st, &format!("tp.cg.{l1}_{l_sh}_{l3}"))
+            let cg = reals(st, &format!("{prefix}tp.cg.{l1}_{l_sh}_{l3}"))
                 .as_chunks::<4>()
                 .0
                 .iter()
@@ -97,31 +101,38 @@ fn tensor_product<T: Real>(
         sh_lmax: 3,
         paths,
     };
-    TensorProduct::new(desc, reals(st, "in.avg_n_neighbors")[0]).unwrap()
+    let avg_n_neighbors = reals(st, &format!("{prefix}in.avg_n_neighbors"))[0];
+    TensorProduct::new(desc, avg_n_neighbors).unwrap()
 }
 
-fn layer<T: Real>(st: &SafeTensors) -> Layer<T> {
-    let (irreps_in, irreps_tp) = (irreps(st, "irreps_in"), irreps(st, "irreps_tp"));
-    let irreps_gated = irreps(st, "irreps_gated");
-    let names = ["mlp.w0", "mlp.w1", "mlp.w2"];
-    let mut sizes = vec![st.tensor(names[0]).unwrap().shape()[0]];
-    sizes.extend(names.map(|n| st.tensor(n).unwrap().shape()[1]));
+/// The layer whose tensors and irreps are named `{prefix}…`.
+fn layer<T: Real>(st: &SafeTensors, prefix: &str) -> Layer<T> {
+    let name = |n: &str| format!("{prefix}{n}");
+    let (irreps_in, irreps_tp) = (
+        irreps(st, &name("irreps_in")),
+        irreps(st, &name("irreps_tp")),
+    );
+    let irreps_gated = irreps(st, &name("irreps_gated"));
+    let names = ["mlp.w0", "mlp.w1", "mlp.w2"].map(name);
+    let mut sizes = vec![st.tensor(&names[0]).unwrap().shape()[0]];
+    sizes.extend(names.iter().map(|n| st.tensor(n).unwrap().shape()[1]));
     let gamma = (0..irreps_gated.blocks().len())
-        .map(|b| reals(st, &format!("norm.gamma.{b}")))
+        .map(|b| reals(st, &name(&format!("norm.gamma.{b}"))))
         .collect();
+    let eps = reals(st, &name("norm.eps"))[0];
     let layer = Layer {
-        linear_1: linear(st, "linear_1", &irreps_in, &irreps_in),
+        linear_1: linear(st, &name("linear_1"), &irreps_in, &irreps_in),
         mlp: Mlp {
             sizes,
-            weights: names.map(|n| to_t(&reals(st, n))).to_vec(),
+            weights: names.iter().map(|n| to_t(&reals(st, n))).collect(),
         },
-        tp: tensor_product(st, &irreps_in, &irreps_tp),
-        linear_2: linear(st, "linear_2", &irreps_tp, &irreps_gated),
-        skip: linear(st, "skip", &irreps_in, &irreps_gated),
-        norm: RmsNorm::new(irreps_gated.clone(), gamma, reals(st, "norm.eps")[0]).unwrap(),
-        gate: Gate::new(irreps_gated, reals(st, "gate.c_silu")[0]).unwrap(),
+        tp: tensor_product(st, prefix, &irreps_in, &irreps_tp),
+        linear_2: linear(st, &name("linear_2"), &irreps_tp, &irreps_gated),
+        skip: linear(st, &name("skip"), &irreps_in, &irreps_gated),
+        norm: RmsNorm::new(irreps_gated.clone(), gamma, eps).unwrap(),
+        gate: Gate::new(irreps_gated, reals(st, &name("gate.c_silu"))[0]).unwrap(),
     };
-    assert_eq!(layer.gate.irreps_out(), &irreps(st, "irreps_out"));
+    assert_eq!(layer.gate.irreps_out(), &irreps(st, &name("irreps_out")));
     layer
 }
 
@@ -137,7 +148,7 @@ struct Case<T: Real> {
 }
 
 fn case<T: Real>(st: &SafeTensors) -> Case<T> {
-    let layer = layer(st);
+    let layer = layer(st, "");
     let x = features(&irreps(st, "irreps_in"), &reals(st, "in.x"));
     let receivers = ints(st, "in.receivers");
     let row_offsets = (0..=x.n)
@@ -193,19 +204,26 @@ impl<T: Real> Case<T> {
     }
 }
 
-fn read(case: &str) -> Vec<u8> {
+fn read(name: &str) -> Vec<u8> {
     let path = format!(
-        "{}/../../fixtures/nequix/layer_{case}.safetensors",
+        "{}/../../fixtures/nequix/{name}.safetensors",
         env!("CARGO_MANIFEST_DIR")
     );
     std::fs::read(&path).unwrap()
 }
 
-/// Checks the output and the gradients of every case against e3nn-jax's, to
-/// `tol` relative to the largest expected magnitude of each.
-fn matches_e3nn<T: Real>(tol: f64) {
+/// Panics unless `actual` is within `tol` of `expected` relative to the
+/// largest expected magnitude.
+fn assert_matches<T: Real>(actual: &[T], expected: &[f64], tol: f64) {
+    let max = expected.iter().fold(0.0, |m: f64, v| m.max(v.abs()));
+    assert_close!(actual, expected, tol * max, 0.0);
+}
+
+/// Checks the output and the gradients of every layer case against
+/// e3nn-jax's, to `tol` relative to the largest expected magnitude of each.
+fn layer_matches_e3nn<T: Real>(tol: f64) {
     for name in CASES {
-        let bytes = read(name);
+        let bytes = read(&format!("layer_{name}"));
         let st = SafeTensors::parse(&bytes).unwrap();
         let c = case::<T>(&st);
         let mut grads = c.zero_grads();
@@ -220,9 +238,7 @@ fn matches_e3nn<T: Real>(tol: f64) {
             .iter()
             .zip(["out.y", "out.d_x", "out.d_sh", "out.d_radial"])
         {
-            let expected = reals(&st, name);
-            let max = expected.iter().fold(0.0, |m: f64, v| m.max(v.abs()));
-            assert_close!(actual, expected, tol * max, 0.0);
+            assert_matches(actual, &reals(&st, name), tol);
         }
     }
 }
@@ -230,18 +246,18 @@ fn matches_e3nn<T: Real>(tol: f64) {
 // The tolerances are about twice the largest errors measured.
 
 #[test]
-fn matches_e3nn_f64() {
-    matches_e3nn::<f64>(2.5e-15);
+fn layer_matches_e3nn_f64() {
+    layer_matches_e3nn::<f64>(2.5e-15);
 }
 
 #[test]
-fn matches_e3nn_f32() {
-    matches_e3nn::<f32>(1.2e-6);
+fn layer_matches_e3nn_f32() {
+    layer_matches_e3nn::<f32>(1.2e-6);
 }
 
 #[test]
 fn backward_adds_to_the_gradients() {
-    let bytes = read("hidden");
+    let bytes = read("layer_hidden");
     let c = case::<f64>(&SafeTensors::parse(&bytes).unwrap());
     let mut once = c.zero_grads();
     c.eval(&mut once);
@@ -252,4 +268,82 @@ fn backward_adds_to_the_gradients() {
     assert_close!(twice.0.data, double(&once.0.data), 5e-16, 0.0);
     assert_close!(twice.1, double(&once.1), 5e-16, 0.0);
     assert_close!(twice.2, double(&once.2), 5e-16, 0.0);
+}
+
+/// The model whose layers are named `layers.{k}.…`.
+fn model<T: Real>(st: &SafeTensors) -> Model<T> {
+    let layers: Vec<Layer<T>> = (0..)
+        .map(|k| format!("layers.{k}."))
+        .take_while(|prefix| st.metadata().contains_key(&format!("{prefix}irreps_in")))
+        .map(|prefix| layer(st, &prefix))
+        .collect();
+    let last = layers[layers.len() - 1].gate.irreps_out();
+    let readout = linear(st, "readout", last, &"0e".parse().unwrap());
+    let scalar = |name: &str| T::from_f64(reals(st, name)[0]);
+    Model {
+        radial: RadialBasis {
+            r_max: scalar("radial.cutoff"),
+            n_basis: layers[0].mlp.sizes[0],
+            p: ints(st, "radial.p")[0] as i32,
+        },
+        layers,
+        readout,
+        scale: scalar("scale"),
+        shift: scalar("shift"),
+        atom_energies: to_t(&reals(st, "atom_energies")),
+    }
+}
+
+/// Checks the energy, forces and stress against e3nn-jax's, to `tol` of each
+/// relative to its largest expected magnitude, with the neighbor list built
+/// by asanoha.
+fn model_matches_e3nn<T: Real>(tol: [f64; 3]) {
+    let bytes = read("model_triclinic");
+    let st = SafeTensors::parse(&bytes).unwrap();
+    let model = model::<T>(&st);
+    let positions: Vec<[T; 3]> = reals(&st, "in.positions")
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| p.map(T::from_f64))
+        .collect();
+    let rows = reals(&st, "in.cell");
+    let cell = Cell::from_rows(core::array::from_fn(|a| {
+        core::array::from_fn(|b| T::from_f64(rows[3 * a + b]))
+    }))
+    .unwrap();
+    let structure = Structure {
+        positions: &positions,
+        cell: Some(&cell),
+        pbc: [true; 3],
+    };
+    let nl = NeighborList::build(&structure, model.radial.r_max, Algorithm::CellList).unwrap();
+    let species: Vec<usize> = ints(&st, "in.species")
+        .iter()
+        .map(|&s| s as usize)
+        .collect();
+    let out = model.evaluate(&species, &nl);
+    let stress = out.virial.as_flattened().iter().map(|&v| v / cell.volume());
+    let actual = [
+        vec![out.energy],
+        out.forces.as_flattened().to_vec(),
+        stress.collect(),
+    ];
+    let names = ["out.energy", "out.forces", "out.stress"];
+    for ((actual, name), tol) in actual.iter().zip(names).zip(tol) {
+        assert_matches(actual, &reals(&st, name), tol);
+    }
+}
+
+// The tolerances are about twice the largest errors measured; the forces
+// reach 0.03 and the stress 5.5e-4.
+
+#[test]
+fn model_matches_e3nn_f64() {
+    model_matches_e3nn::<f64>([1.7e-15, 5e-15, 2.4e-14]);
+}
+
+#[test]
+fn model_matches_e3nn_f32() {
+    model_matches_e3nn::<f32>([8.5e-8, 2e-6, 9.5e-6]);
 }

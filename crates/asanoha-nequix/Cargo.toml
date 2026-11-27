@@ -7,8 +7,10 @@ license.workspace = true
 
 [dependencies]
 asanoha-core = { path = "../asanoha-core" }
+asanoha-nblist = { path = "../asanoha-nblist" }
 asanoha-ops = { path = "../asanoha-ops" }
 asanoha-radial = { path = "../asanoha-radial" }
+asanoha-sph = { path = "../asanoha-sph" }
 asanoha-tp = { path = "../asanoha-tp" }
 
 [dev-dependencies]

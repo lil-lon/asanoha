@@ -78,6 +78,11 @@ impl<T: Real> Linear<T> {
         })
     }
 
+    /// Irreps of the input.
+    pub fn irreps_in(&self) -> &Irreps {
+        &self.irreps_in
+    }
+
     /// Irreps of the output.
     pub fn irreps_out(&self) -> &Irreps {
         &self.irreps_out
