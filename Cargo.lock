@@ -18,8 +18,10 @@ name = "asanoha-nequix"
 version = "0.0.0"
 dependencies = [
  "asanoha-core",
+ "asanoha-nblist",
  "asanoha-ops",
  "asanoha-radial",
+ "asanoha-sph",
  "asanoha-tp",
 ]
 

@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from asanoha_export import bench, layer, nblist, ops, sph, tp
+from asanoha_export import bench, layer, model, nblist, ops, sph, tp
 
 
 def main():
@@ -19,5 +19,6 @@ def main():
         tp.write(args.out / "tp")
         ops.write(args.out / "ops")
         layer.write(args.out / "nequix")
+        model.write(args.out / "nequix")
     else:
         bench.run()

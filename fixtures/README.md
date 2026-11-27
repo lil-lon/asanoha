@@ -167,3 +167,31 @@ node 3 receives none. The radial MLP has sizes `[8, 16, 16, num_irreps_tp]`.
 | `layer_scalar_in` | `6x0e` | `5x0e+4x1o+3x2e+2x3o` |
 | `layer_hidden` | `5x0e+4x1o+3x2e+2x3o` | the same |
 | `layer_scalar_out` | `5x0e+4x1o+3x2e+2x3o` | `5x0e` |
+
+`model_*`: nequix's `Nequix` with the layers of `layer_*`, transcribed from
+`node_energies` and the periodic branch of `__call__`, with random weights
+and `jax_enable_x64`, read by `crates/asanoha-nequix/tests/e3nn.rs`. The
+neighbor list is `matscipy.neighbours.neighbour_list("ijS", ...)` with
+receivers `i` and senders `j`, as nequix builds it; the reader builds its own.
+
+| Tensor | dtype | Shape | |
+|---|---|---|---|
+| `layers.{k}.…` | | | the tensors of `layer_*` other than `in.*` and `out.*`, plus `in.avg_n_neighbors`, for layer `k` |
+| `readout.0_0` | F64 | `[mul, 1]` | weights of the readout to `0e`, as `linear.{i}_{o}` in `ops/` |
+| `radial.cutoff` | F64 | `[]` | cutoff of the radial basis and the neighbor list |
+| `radial.p` | I64 | `[]` | exponent of the polynomial cutoff |
+| `scale`, `shift` | F64 | `[]` | `ε_i = readout(h)_i · scale + shift + atom_energies[species_i]` |
+| `atom_energies` | F64 | `[n_species]` | per-species energy |
+| `in.positions` | F64 | `[N, 3]` | Cartesian positions |
+| `in.cell` | F64 | `[3, 3]` | lattice vectors as rows, periodic along all axes |
+| `in.species` | I64 | `[N]` | species index |
+| `out.energy` | F64 | `[]` | `E = Σ_i ε_i` |
+| `out.forces` | F64 | `[N, 3]` | `−∂E/∂r_i` from `jax.grad` |
+| `out.stress` | F64 | `[3, 3]` | `∂E/∂ε` for the symmetric strain `ε` from `jax.grad`, over the cell volume |
+
+`__metadata__` holds the irreps of `layer_*` for each layer `k` as
+`layers.{k}.irreps_*`.
+
+| File | Case |
+|---|---|
+| `model_triclinic` | 6 atoms of 3 species in a random triclinic cell, cutoff 4; layers `3x0e → 5x0e+4x1o+3x2e+2x3o → the same → 5x0e` |
