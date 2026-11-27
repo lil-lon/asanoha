@@ -59,12 +59,13 @@ def with_vjp(f, x, rng):
     return {"in.x": x, "out.y": np.asarray(y), "in.d_y": d_y, "out.d_x": np.asarray(d_x)}
 
 
-def linear(irreps_in, irreps_out, rng):
+def random_linear(irreps_in, irreps_out, rng, name):
     """`e3nn.equinox.Linear(irreps_in=…, irreps_out=…, force_irreps_out=True)` with random weights.
 
-    Like the equinox module, the linear map is built on the regrouped input
-    irreps; its weights are split back by rows into one
-    `linear.{i}_{o}` per block `i` of `irreps_in`, with `√α` folded in.
+    Returns the map of `[N, irreps_in.dim]` arrays and its weights. Like the
+    equinox module, the map is built on the regrouped input irreps; its
+    weights are split back by rows into one `{name}.{i}_{o}` per block `i` of
+    `irreps_in`, with `√α` folded in.
     """
     lin = e3nn.FunctionalLinear(irreps_in.regroup(), irreps_out)
     ws = [rng.normal(size=ins.path_shape) for ins in lin.instructions]
@@ -72,15 +73,21 @@ def linear(irreps_in, irreps_out, rng):
     def f(x):
         return jax.vmap(lambda a: lin(ws, e3nn.IrrepsArray(irreps_in, a).regroup()).array)(x)
 
-    tensors = with_vjp(f, rng.normal(size=(N, irreps_in.dim)), rng)
+    tensors = {}
     rows = {}
     for i, (mul, ir) in enumerate(irreps_in):
         start = rows.get(ir, 0)
         rows[ir] = start + mul
         for ins, w in zip(lin.instructions, ws):
             if lin.irreps_in[ins.i_in].ir == ir:
-                tensors[f"linear.{i}_{ins.i_out}"] = ins.path_weight * w[start : start + mul]
-    return tensors
+                tensors[f"{name}.{i}_{ins.i_out}"] = ins.path_weight * w[start : start + mul]
+    return f, tensors
+
+
+def linear(irreps_in, irreps_out, rng):
+    """`random_linear` with weights `linear.{i}_{o}`, on a random input."""
+    f, weights = random_linear(irreps_in, irreps_out, rng, "linear")
+    return with_vjp(f, rng.normal(size=(N, irreps_in.dim)), rng) | weights
 
 
 def c_silu():

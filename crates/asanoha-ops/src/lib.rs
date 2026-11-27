@@ -4,6 +4,12 @@
 //!
 //! All features are in [`Layout::IrMul`](asanoha_core::Layout::IrMul).
 //! Weights and normalization constants are data from the exporter.
+//!
+//! `Linear` and `Gate` follow `FunctionalLinear` and `gate` in e3nn/e3nn-jax
+//! (Apache-2.0) `e3nn_jax/_src/linear.py` and `e3nn_jax/_src/gate.py`, and
+//! `RmsNorm` is transcribed from `RMSLayerNorm` in nequix (MIT)
+//! `nequix/layer_norm.py`. Their licenses are reproduced in
+//! `THIRD_PARTY_LICENSES/` for attribution.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 

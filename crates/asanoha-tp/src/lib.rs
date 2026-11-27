@@ -142,6 +142,11 @@ impl<T: Real> TensorProduct<T> {
         })
     }
 
+    /// Irreps of the output.
+    pub fn irreps_out(&self) -> &Irreps {
+        &self.irreps_out
+    }
+
     /// Checks the shapes of the arguments of [`TensorProduct::forward`] and
     /// [`naive::forward`].
     fn check(

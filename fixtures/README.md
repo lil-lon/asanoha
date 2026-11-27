@@ -132,3 +132,38 @@ affine weights.
 | `gate_scalar_out` | `5x0e` | `5x0e` |
 | `norm_hidden` | `14x0e+4x1o+3x2e+2x3o` | the same |
 | `norm_scalar_out` | `5x0e` | the same |
+
+## `nequix/`
+
+`layer_*`: nequix's `NequixConvolution.__call__` without the kernel and with
+a species-independent skip connection, built from the operations of `tp/`
+and `ops/` with random weights and `jax_enable_x64`, read by
+`crates/asanoha-nequix/tests/e3nn.rs`. The graph has 5 nodes and 12 edges;
+node 3 receives none. The radial MLP has sizes `[8, 16, 16, num_irreps_tp]`.
+
+| Tensor | dtype | Shape | |
+|---|---|---|---|
+| `in.x` | F64 | `[N, dim_in]` | node features in e3nn's layout |
+| `in.sh` | F64 | `[E, 16]` | spherical harmonics `l ≤ 3` of random vectors |
+| `in.radial` | F64 | `[E, 8]` | radial basis |
+| `in.receivers`, `in.senders` | I64 | `[E]` | edges, sorted by receiver |
+| `in.avg_n_neighbors` | F64 | `[]` | `n̄` |
+| `linear_1.{i}_{o}`, `linear_2.{i}_{o}`, `skip.{i}_{o}` | F64 | `[mul_in, mul_out]` | as `linear.{i}_{o}` in `ops/` |
+| `mlp.w{k}` | F64 | `[in, out]` | weights of the radial MLP's layer `k` |
+| `tp.paths`, `tp.cg.{l1}_{l2}_{l3}` | | | as in `tp/` |
+| `norm.gamma.{b}`, `norm.eps` | | | as in `ops/`, for `irreps_gated` |
+| `gate.c_silu` | F64 | `[]` | as in `ops/` |
+| `out.y` | F64 | `[N, dim_out]` | output in e3nn's layout |
+| `in.d_y` | F64 | `[N, dim_out]` | random cotangent `∂L/∂y` |
+| `out.d_x` | F64 | `[N, dim_in]` | `∂L/∂x` from `jax.vjp` |
+| `out.d_sh` | F64 | `[E, 16]` | `∂L/∂Y` from `jax.vjp` |
+| `out.d_radial` | F64 | `[E, 8]` | `∂L/∂R` from `jax.vjp` |
+
+`__metadata__` holds `irreps_in`, `irreps_tp` (as in `tp/`), `irreps_gated`
+(the output irreps plus the gate scalars, regrouped) and `irreps_out`.
+
+| File | Input irreps | Output irreps |
+|---|---|---|
+| `layer_scalar_in` | `6x0e` | `5x0e+4x1o+3x2e+2x3o` |
+| `layer_hidden` | `5x0e+4x1o+3x2e+2x3o` | the same |
+| `layer_scalar_out` | `5x0e+4x1o+3x2e+2x3o` | `5x0e` |

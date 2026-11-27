@@ -1,0 +1,15 @@
+[package]
+name = "asanoha-nequix"
+description = "Nequix interatomic potential assembled from the asanoha kernels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+asanoha-core = { path = "../asanoha-core" }
+asanoha-ops = { path = "../asanoha-ops" }
+asanoha-radial = { path = "../asanoha-radial" }
+asanoha-tp = { path = "../asanoha-tp" }
+
+[dev-dependencies]
+asanoha-core = { path = "../asanoha-core", features = ["testing"] }
