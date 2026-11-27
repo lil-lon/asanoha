@@ -107,7 +107,9 @@ impl<T: Real> Model<T> {
         let mut w = [[T::ZERO; 3]; 3];
         let (mut basis, mut d_basis) = (vec![T::ZERO; n_basis], vec![T::ZERO; n_basis]);
         let grads = d_sh
-            .chunks_exact(DIM_LMAX3)
+            .as_chunks::<DIM_LMAX3>()
+            .0
+            .iter()
             .zip(d_radial.chunks_exact(n_basis));
         for (e, (i, (d_y, d_r))) in nl.receivers().zip(grads).enumerate() {
             let (r, dist) = (nl.vectors[e], nl.distances[e]);
